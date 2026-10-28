@@ -101,6 +101,7 @@ struct Active {
     len: u64,
 }
 
+/// Single-writer handle to an on-disk store. Reads take `&self` and are safe to share across threads.
 pub struct Store {
     root: PathBuf,
     cfg: StoreConfig,
@@ -112,6 +113,7 @@ pub struct Store {
 }
 
 impl Store {
+    /// Opens or creates a store, taking an exclusive lock. Rebuilds the index first if the last session did not shut down cleanly.
     pub fn open(root: impl AsRef<Path>, cfg: StoreConfig) -> Result<Store> {
         cfg.chunker.validate()?;
         let root = root.as_ref().to_path_buf();
@@ -248,6 +250,7 @@ impl Store {
         Ok(e)
     }
 
+    /// Chunks, dedups and stores a stream. Returns the object id (Merkle root). Storing the same bytes twice is a no-op.
     pub fn put_reader<R: Read + Send>(&mut self, src: R) -> Result<PutReport> {
         // refcounts only become correct again after add_refs below, so a
         // crash in between must force a rebuild
@@ -363,6 +366,7 @@ impl Store {
         Ok(f)
     }
 
+    /// Reads one chunk and re-hashes it; a mismatch is `Error::Corrupt`.
     pub fn get_chunk(&self, h: &Hash) -> Result<Vec<u8>> {
         let e = self.index.get(h).ok_or(Error::MissingChunk(*h))?;
         let f = self.reader(e.segment)?;
@@ -380,6 +384,7 @@ impl Store {
         Ok(payload)
     }
 
+    /// Writes the whole object to `out`, verifying every chunk on the way.
     pub fn read_into<W: Write>(&self, id: &Hash, mut out: W) -> Result<u64> {
         let m = self.manifest(id)?;
         for c in &m.chunks {
@@ -438,6 +443,7 @@ impl Store {
         Ok(true)
     }
 
+    /// Merkle inclusion proof for chunk number `chunk` of the object.
     pub fn prove(&self, id: &Hash, chunk: usize) -> Result<(ChunkRef, Proof)> {
         let m = self.manifest(id)?;
         let p = m.tree().proof(chunk).ok_or(Error::OutOfRange)?;
@@ -575,6 +581,7 @@ impl Store {
         Ok(rep)
     }
 
+    /// Flushes the active segment and marks the index clean. Also runs on drop.
     pub fn sync(&mut self) -> Result<()> {
         if let Some(a) = &self.active {
             a.file.sync_data()?;

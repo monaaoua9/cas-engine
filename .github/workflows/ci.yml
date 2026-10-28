@@ -31,3 +31,24 @@ jobs:
           for t in manifest_decode segment_scan chunker; do
             cargo fuzz run $t -- -max_total_time=60
           done
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89
+      - run: cargo check --lib --bins
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit

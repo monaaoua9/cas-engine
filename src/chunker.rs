@@ -27,6 +27,7 @@ impl Default for ChunkerConfig {
 }
 
 impl ChunkerConfig {
+    /// Checks the invariants the chunker relies on; `Chunker::new` calls this.
     pub fn validate(&self) -> Result<()> {
         if !self.avg_size.is_power_of_two() {
             return Err(Error::InvalidConfig("avg_size must be a power of two"));

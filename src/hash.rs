@@ -11,6 +11,7 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 pub struct Hash([u8; HASH_LEN]);
 
 impl Hash {
+    /// BLAKE3 digest of `data`.
     pub fn of(data: &[u8]) -> Hash {
         Hash(*blake3::hash(data).as_bytes())
     }
