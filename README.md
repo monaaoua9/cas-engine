@@ -1,5 +1,7 @@
 # cas
 
+[![ci](https://github.com/monaaoua9/cas-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/monaaoua9/cas-engine/actions/workflows/ci.yml)
+
 A content-addressed, immutable, deduplicating object store in Rust.
 
 Files are cut into content-defined chunks with a Rabin rolling fingerprint, every chunk is keyed by its BLAKE3 hash, and a file is named by the Merkle root over its chunk list. Chunks live in append-only segment files, found through a memory-mapped hash index. Reference counts plus a compacting GC give the space back when objects are deleted.
@@ -115,17 +117,17 @@ Defaults: chunks 64 KiB min / 256 KiB avg-step / 1 MiB max, 64 MiB segments, GC 
 
 ## Performance
 
-`cargo bench` (criterion, 32 MiB of random data, release build, a Windows laptop; numbers move by about 20% between runs):
+`cargo bench` (criterion, 32 MiB of random data, release build, one run on a Windows laptop with other things open, so treat it as a rough floor):
 
 | Benchmark | Throughput |
 |---|---|
-| Rabin split only | 300-380 MiB/s |
-| BLAKE3, one buffer | 1.6-2.5 GiB/s |
-| `put`, new data, to disk | ~170 MiB/s |
-| `put`, everything already stored | ~270 MiB/s |
-| `get` with per-chunk hash verification | ~540 MiB/s |
+| Rabin split only | ~245 MiB/s |
+| BLAKE3, one buffer | ~1.5 GiB/s |
+| `put`, new data, to disk | ~145 MiB/s |
+| `put`, everything already stored | ~205 MiB/s |
+| `get` with per-chunk hash verification | ~190 MiB/s |
 
-Chunking runs on its own thread, so hashing and segment writes overlap with it. The table above was taken before that change, on a quiet machine; later runs on a busier one scored lower across the board (even the untouched `get`), so compare ratios, not absolutes. Against `get` on the same run, `put` went from about 0.3x to about 0.55x.
+Chunking runs on its own thread, so hashing and segment writes overlap with it. Numbers on this machine swing by 30-40% between runs (the Rabin loop alone has measured anywhere from 245 to 380 MiB/s), so compare ratios, not absolutes: `cargo bench` on your own hardware is the real answer.
 
 The chunker is the bottleneck: each byte depends on the previous fingerprint through a table lookup, so it cannot be vectorised. The window is the input slice itself (no ring buffer) and the first `min_size - 48` bytes of every chunk are skipped, which together doubled its speed.
 
