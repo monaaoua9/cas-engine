@@ -79,7 +79,7 @@ Objects are deleted by removing the manifest and decrementing one reference per 
 
 | Module | Role |
 |---|---|
-| `chunker` | streaming Rabin CDC over any `Read`, 48-byte window, GF(2) polynomial tables |
+| `chunker` | streaming content-defined chunking over any `Read`: Rabin (GF(2) polynomial tables) or Gear |
 | `hash` | 32-byte BLAKE3 digest newtype, hex parse/print |
 | `merkle` | tree, inclusion proofs, verification |
 | `manifest` | object recipe + binary encoding with checksum |
@@ -113,7 +113,7 @@ store.remove(&put.id)?;
 store.gc()?;
 ```
 
-Defaults: chunks 64 KiB min / 256 KiB avg-step / 1 MiB max, 64 MiB segments, GC threshold 30%. The average step is on top of the minimum, so typical chunks run around 320 KiB.
+Defaults (Rabin; `--chunker gear` or `ChunkerConfig { algorithm: Algorithm::Gear, .. }` for Gear): chunks 64 KiB min / 256 KiB avg-step / 1 MiB max, 64 MiB segments, GC threshold 30%. The average step is on top of the minimum, so typical chunks run around 320 KiB.
 
 ## Performance
 
@@ -121,13 +121,16 @@ Defaults: chunks 64 KiB min / 256 KiB avg-step / 1 MiB max, 64 MiB segments, GC 
 
 | Benchmark | Throughput |
 |---|---|
-| Rabin split only | ~245 MiB/s |
-| BLAKE3, one buffer | ~1.5 GiB/s |
-| `put`, new data, to disk | ~145 MiB/s |
-| `put`, everything already stored | ~205 MiB/s |
-| `get` with per-chunk hash verification | ~190 MiB/s |
+| Rabin split only | ~170 MiB/s |
+| Gear split only (`--chunker gear`) | ~340 MiB/s |
+| BLAKE3, one buffer | ~1.2 GiB/s |
+| `put`, new data, Rabin | ~97 MiB/s |
+| `put`, new data, Gear | ~176 MiB/s |
+| `get` with per-chunk hash verification | ~390 MiB/s |
 
-Chunking runs on its own thread, so hashing and segment writes overlap with it. Numbers on this machine swing by 30-40% between runs (the Rabin loop alone has measured anywhere from 245 to 380 MiB/s), so compare ratios, not absolutes: `cargo bench` on your own hardware is the real answer.
+Both algorithms behave the same way (min/avg/max sizes, resync after an insertion, deterministic), so the choice is speed versus tradition: Rabin matches what restic and LBFS do, Gear is about twice as fast here. Data stored with one stays readable under the other; the same bytes chunked by different algorithms simply become two objects that do not share chunks.
+
+Chunking runs on its own thread, so hashing and segment writes overlap with it. This machine is noisy: the same Rabin benchmark has read anywhere from 170 to 380 MiB/s on different runs, so compare ratios inside one table, not numbers across runs. `cargo bench` on your own hardware is the real answer.
 
 The chunker is the bottleneck: each byte depends on the previous fingerprint through a table lookup, so it cannot be vectorised. The window is the input slice itself (no ring buffer) and the first `min_size - 48` bytes of every chunk are skipped, which together doubled its speed.
 
@@ -144,7 +147,7 @@ The chunker is the bottleneck: each byte depends on the previous fingerprint thr
 | `tests/props.rs` (proptest) | random put/remove/gc/reopen sequences against a model; chunker reassembly and read-size independence; manifest and segment parsers on arbitrary bytes; truncated segment is always a clean prefix; tampered Merkle proofs |
 | `tests/crash_failpoints.rs` | the binary exits at named points inside put/rm/gc (`cargo test --features failpoints`), then the store must reopen, verify, keep committed data, and gc cleanly |
 | `tests/crash_kill.rs` | the binary is killed at arbitrary times during put and gc |
-| `fuzz/` | libFuzzer targets for `Manifest::decode`, `segment::scan` and the chunker (`cargo +nightly fuzz run manifest_decode`) |
+| `fuzz/` | libFuzzer targets for `Manifest::decode`, `segment::scan` and both chunkers (`cargo +nightly fuzz run manifest_decode`); CI runs 60 s per target on every push and 30 min per target every Sunday |
 
 One failpoint test exists because of a real hazard: a put whose chunks are all already stored changes no index slot until refcounts are bumped, so the dirty flag has to be set before the manifest becomes visible. Removing that line makes `crash_on_dedup_only_put_does_not_lose_data` fail.
 

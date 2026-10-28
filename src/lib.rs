@@ -13,7 +13,7 @@ pub mod merkle;
 pub mod segment;
 pub mod store;
 
-pub use chunker::{Chunker, ChunkerConfig};
+pub use chunker::{Algorithm, Chunker, ChunkerConfig};
 pub use error::{Error, Result};
 pub use hash::Hash;
 pub use manifest::{ChunkRef, Manifest};

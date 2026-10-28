@@ -3,7 +3,7 @@ use std::io::BufWriter;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use cas::{Hash, Result, Store, StoreConfig};
+use cas::{Algorithm, Hash, Result, Store, StoreConfig};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -12,6 +12,10 @@ struct Cli {
     /// store directory, created on first use
     #[arg(short, long, default_value = "./cas-store")]
     store: PathBuf,
+
+    /// boundary algorithm for new data; gear is several times faster, rabin is the default
+    #[arg(long, value_parser = ["rabin", "gear"], default_value = "rabin")]
+    chunker: String,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -60,7 +64,11 @@ fn human(n: u64) -> String {
 }
 
 fn run(cli: Cli) -> Result<bool> {
-    let mut store = Store::open(&cli.store, StoreConfig::default())?;
+    let mut cfg = StoreConfig::default();
+    if cli.chunker == "gear" {
+        cfg.chunker.algorithm = Algorithm::Gear;
+    }
+    let mut store = Store::open(&cli.store, cfg)?;
 
     match cli.cmd {
         Cmd::Put { path } => {

@@ -17,7 +17,7 @@ fn noise(len: usize, seed: u64) -> Vec<u8> {
 
 fn cfg() -> StoreConfig {
     StoreConfig {
-        chunker: ChunkerConfig { min_size: 1 << 10, avg_size: 4 << 10, max_size: 16 << 10 },
+        chunker: ChunkerConfig { min_size: 1 << 10, avg_size: 4 << 10, max_size: 16 << 10, ..ChunkerConfig::default() },
         segment_size: 64 << 10,
         gc_threshold: 0.3,
     }
@@ -312,4 +312,30 @@ fn concurrent_readers_share_one_store() {
             });
         }
     });
+}
+
+#[test]
+fn data_written_with_one_chunker_reads_back_with_another() {
+    use cas::Algorithm;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data = noise(300_000, 41);
+    let gear = {
+        let mut c = cfg();
+        c.chunker.algorithm = Algorithm::Gear;
+        c
+    };
+
+    let id = Store::open(dir.path(), gear).unwrap().put_bytes(&data).unwrap().id;
+    let mut s = Store::open(dir.path(), cfg()).unwrap();
+    assert_eq!(s.read_to_vec(&id).unwrap(), data);
+    s.verify(&id).unwrap();
+
+    // same bytes under the other algorithm are a different object, both coexist
+    let id2 = s.put_bytes(&data).unwrap().id;
+    assert_ne!(id, id2);
+    assert_eq!(s.read_to_vec(&id2).unwrap(), data);
+    assert!(s.remove(&id).unwrap());
+    s.gc().unwrap();
+    assert_eq!(s.read_to_vec(&id2).unwrap(), data);
 }

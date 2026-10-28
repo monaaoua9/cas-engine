@@ -10,8 +10,24 @@ const POLY_DEG: u32 = 53;
 
 pub const WINDOW: usize = 48;
 
+// a gear hash forgets a byte after 64 shifts of a u64
+const GEAR_WINDOW: usize = 64;
+
+/// How chunk boundaries are found. The choice only affects dedup between
+/// objects stored with different settings; stored data stays readable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Algorithm {
+    /// Rabin fingerprint over a 48-byte window.
+    #[default]
+    Rabin,
+    /// Gear hash (as in FastCDC): one shift, one add and one table lookup per
+    /// byte, several times faster than Rabin.
+    Gear,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ChunkerConfig {
+    pub algorithm: Algorithm,
     pub min_size: usize,
     /// Must be a power of two. Boundaries are declared when the low
     /// log2(avg_size) bits of the fingerprint are zero, so a chunk is
@@ -22,7 +38,7 @@ pub struct ChunkerConfig {
 
 impl Default for ChunkerConfig {
     fn default() -> Self {
-        ChunkerConfig { min_size: 64 << 10, avg_size: 256 << 10, max_size: 1 << 20 }
+        ChunkerConfig { algorithm: Algorithm::Rabin, min_size: 64 << 10, avg_size: 256 << 10, max_size: 1 << 20 }
     }
 }
 
@@ -32,7 +48,10 @@ impl ChunkerConfig {
         if !self.avg_size.is_power_of_two() {
             return Err(Error::InvalidConfig("avg_size must be a power of two"));
         }
-        if self.min_size < WINDOW {
+        if self.avg_size < 2 {
+            return Err(Error::InvalidConfig("avg_size must be at least 2"));
+        }
+        if self.min_size < GEAR_WINDOW {
             return Err(Error::InvalidConfig("min_size is smaller than the rolling window"));
         }
         if self.max_size <= self.min_size {
@@ -169,14 +188,17 @@ impl<R: Read> Chunker<R> {
             return data.len();
         }
 
+        let limit = data.len().min(self.cfg.max_size);
+        if self.cfg.algorithm == Algorithm::Gear {
+            return scan_gear(data, min, limit, self.cfg.avg_size);
+        }
+
         // no boundary can land before min, so only the last WINDOW bytes
         // before it are needed to prime the fingerprint
         let mut r = Rolling::new();
         for &b in &data[min - WINDOW..min] {
             r.slide(b);
         }
-
-        let limit = data.len().min(self.cfg.max_size);
         scan_boundary(data, min, limit, self.mask, r.digest)
     }
 }
@@ -192,6 +214,42 @@ fn scan_boundary(data: &[u8], min: usize, limit: usize, mask: u64, mut d: u64) -
         let top = (d >> (POLY_DEG - 8)) as usize & 0xFF;
         d = ((d << 8) | b as u64) ^ t.modt[top];
         if d & mask == 0 {
+            return min + i + 1;
+        }
+    }
+    limit
+}
+
+fn gear_table() -> &'static [u64; 256] {
+    static T: OnceLock<[u64; 256]> = OnceLock::new();
+    T.get_or_init(|| {
+        // splitmix64 from a fixed seed: the table must never change between
+        // releases or every boundary (and all dedup) would move
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut t = [0u64; 256];
+        for e in &mut t {
+            x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = x;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            *e = z ^ (z >> 31);
+        }
+        t
+    })
+}
+
+// The test looks at the top bits, which depend on the last 64 bytes, so a
+// boundary is decided by local content only and resyncs after an edit.
+fn scan_gear(data: &[u8], min: usize, limit: usize, avg: usize) -> usize {
+    let g = gear_table();
+    let shift = 64 - avg.trailing_zeros();
+    let mut h = 0u64;
+    for &b in &data[min - GEAR_WINDOW..min] {
+        h = (h << 1).wrapping_add(g[b as usize]);
+    }
+    for (i, &b) in data[min..limit].iter().enumerate() {
+        h = (h << 1).wrapping_add(g[b as usize]);
+        if h >> shift == 0 {
             return min + i + 1;
         }
     }
@@ -240,7 +298,7 @@ mod tests {
     }
 
     fn small() -> ChunkerConfig {
-        ChunkerConfig { min_size: 2 << 10, avg_size: 8 << 10, max_size: 32 << 10 }
+        ChunkerConfig { min_size: 2 << 10, avg_size: 8 << 10, max_size: 32 << 10, ..ChunkerConfig::default() }
     }
 
     fn split(data: &[u8]) -> Vec<Chunk> {
@@ -321,9 +379,57 @@ mod tests {
         }
     }
 
+    fn gear() -> ChunkerConfig {
+        ChunkerConfig { algorithm: Algorithm::Gear, ..small() }
+    }
+
+    fn split_gear(data: &[u8]) -> Vec<Chunk> {
+        Chunker::new(data, gear()).unwrap().map(|c| c.unwrap()).collect()
+    }
+
+    #[test]
+    fn gear_reassembles_and_respects_bounds() {
+        let data = noise(2 << 20, 17);
+        let chunks = split_gear(&data);
+        let joined: Vec<u8> = chunks.iter().flat_map(|c| c.data.iter().copied()).collect();
+        assert_eq!(joined, data);
+        for c in &chunks[..chunks.len() - 1] {
+            assert!(c.data.len() > gear().min_size && c.data.len() <= gear().max_size);
+        }
+        assert!(chunks.len() > 20);
+    }
+
+    #[test]
+    fn gear_mean_chunk_size_is_close_to_target() {
+        let data = noise(8 << 20, 23);
+        let n = split_gear(&data).len();
+        let mean = data.len() / n;
+        // min + avg = 10 KiB expected; the max cap pulls it down a little
+        assert!((7_000..12_000).contains(&mean), "mean {mean}");
+    }
+
+    #[test]
+    fn gear_boundaries_resync_after_insertion() {
+        let base = noise(2 << 20, 42);
+        let mut shifted = noise(1234, 5);
+        shifted.extend_from_slice(&base);
+
+        let a: HashSet<_> = split_gear(&base).iter().map(|c| Hash::of(&c.data)).collect();
+        let b: Vec<_> = split_gear(&shifted).iter().map(|c| Hash::of(&c.data)).collect();
+        let shared = b.iter().filter(|h| a.contains(h)).count();
+        assert!(shared * 10 >= b.len() * 9, "only {shared}/{} chunks survived", b.len());
+    }
+
+    #[test]
+    fn gear_table_is_frozen() {
+        // changing the table silently invalidates dedup against old data
+        assert_eq!(gear_table()[0], 0x6e789e6aa1b965f4);
+        assert_eq!(gear_table()[255], 0xcbdc6d34b7c7534d);
+    }
+
     #[test]
     fn rejects_bad_config() {
-        let bad = ChunkerConfig { min_size: 100, avg_size: 1000, max_size: 5000 };
+        let bad = ChunkerConfig { min_size: 100, avg_size: 1000, max_size: 5000, ..ChunkerConfig::default() };
         assert!(Chunker::new(&[][..], bad).is_err());
     }
 

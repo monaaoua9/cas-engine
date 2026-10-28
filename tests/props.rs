@@ -3,11 +3,16 @@ use std::collections::HashMap;
 use cas::chunker::Chunker;
 use cas::manifest::{ChunkRef, Manifest};
 use cas::merkle::{MerkleTree, leaf_hash};
-use cas::{ChunkerConfig, Hash, Store, StoreConfig, segment};
+use cas::{Algorithm, ChunkerConfig, Hash, Store, StoreConfig, segment};
 use proptest::prelude::*;
 
 fn small_chunks() -> ChunkerConfig {
-    ChunkerConfig { min_size: 512, avg_size: 2048, max_size: 8192 }
+    ChunkerConfig { min_size: 512, avg_size: 2048, max_size: 8192, ..ChunkerConfig::default() }
+}
+
+fn chunks_for(gear: bool) -> ChunkerConfig {
+    let algorithm = if gear { Algorithm::Gear } else { Algorithm::Rabin };
+    ChunkerConfig { algorithm, ..small_chunks() }
 }
 
 fn store_cfg() -> StoreConfig {
@@ -106,8 +111,8 @@ proptest! {
     }
 
     #[test]
-    fn chunker_reassembles_and_respects_bounds(data in prop::collection::vec(any::<u8>(), 0..120_000)) {
-        let cfg = small_chunks();
+    fn chunker_reassembles_and_respects_bounds(data in prop::collection::vec(any::<u8>(), 0..120_000), gear in any::<bool>()) {
+        let cfg = chunks_for(gear);
         let chunks: Vec<_> = Chunker::new(&data[..], cfg).unwrap().map(|c| c.unwrap()).collect();
 
         let joined: Vec<u8> = chunks.iter().flat_map(|c| c.data.iter().copied()).collect();
@@ -122,7 +127,7 @@ proptest! {
 
     // reading the source in awkward pieces must not move any boundary
     #[test]
-    fn chunking_ignores_read_sizes(data in prop::collection::vec(any::<u8>(), 0..60_000), step in 1usize..5000) {
+    fn chunking_ignores_read_sizes(data in prop::collection::vec(any::<u8>(), 0..60_000), step in 1usize..5000, gear in any::<bool>()) {
         struct Trickle<'a>(&'a [u8], usize);
         impl std::io::Read for Trickle<'_> {
             fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -132,8 +137,8 @@ proptest! {
                 Ok(n)
             }
         }
-        let whole: Vec<_> = Chunker::new(&data[..], small_chunks()).unwrap().map(|c| c.unwrap().data).collect();
-        let dribbled: Vec<_> = Chunker::new(Trickle(&data, step), small_chunks()).unwrap().map(|c| c.unwrap().data).collect();
+        let whole: Vec<_> = Chunker::new(&data[..], chunks_for(gear)).unwrap().map(|c| c.unwrap().data).collect();
+        let dribbled: Vec<_> = Chunker::new(Trickle(&data, step), chunks_for(gear)).unwrap().map(|c| c.unwrap().data).collect();
         prop_assert_eq!(whole, dribbled);
     }
 
