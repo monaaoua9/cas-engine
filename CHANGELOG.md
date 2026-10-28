@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Gear (FastCDC-style) chunker as an alternative to Rabin, `--chunker gear` on the CLI; about 2x faster
-- Weekly 30-minute fuzz run in CI
+- Weekly 30-minute fuzz run in its own workflow, uploads crash inputs; the CI badge is not affected by it
 - API docs, SECURITY.md, CI jobs for docs, MSRV 1.89 and cargo-audit
 
 ## 0.1.0
