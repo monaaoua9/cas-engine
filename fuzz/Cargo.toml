@@ -1,0 +1,35 @@
+[package]
+name = "cas-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+
+[dependencies.cas]
+path = ".."
+
+[workspace]
+
+[[bin]]
+name = "manifest_decode"
+path = "fuzz_targets/manifest_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "segment_scan"
+path = "fuzz_targets/segment_scan.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "chunker"
+path = "fuzz_targets/chunker.rs"
+test = false
+doc = false
