@@ -123,12 +123,12 @@ Defaults (Rabin; `--chunker gear` or `ChunkerConfig { algorithm: Algorithm::Gear
 
 | Benchmark | Throughput |
 |---|---|
-| Rabin split only | ~170 MiB/s |
-| Gear split only (`--chunker gear`) | ~340 MiB/s |
-| BLAKE3, one buffer | ~1.2 GiB/s |
-| `put`, new data, Rabin | ~97 MiB/s |
-| `put`, new data, Gear | ~176 MiB/s |
-| `get` with per-chunk hash verification | ~390 MiB/s |
+| Rabin split only | ~168 MiB/s |
+| Gear split only (`--chunker gear`) | ~412 MiB/s |
+| BLAKE3, one buffer | ~2.3 GiB/s |
+| `put`, new data, Rabin | ~178 MiB/s |
+| `put`, new data, Gear | ~260 MiB/s |
+| `get` with per-chunk hash verification | ~324 MiB/s |
 
 Both algorithms behave the same way (min/avg/max sizes, resync after an insertion, deterministic), so the choice is speed versus tradition: Rabin matches what restic and LBFS do, Gear is about twice as fast here. Data stored with one stays readable under the other; the same bytes chunked by different algorithms simply become two objects that do not share chunks.
 
