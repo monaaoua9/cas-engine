@@ -6,6 +6,8 @@ A content-addressed, immutable, deduplicating object store in Rust.
 
 Files are cut into content-defined chunks with a Rabin rolling fingerprint, every chunk is keyed by its BLAKE3 hash, and a file is named by the Merkle root over its chunk list. Chunks live in append-only segment files, found through a memory-mapped hash index. Reference counts plus a compacting GC give the space back when objects are deleted.
 
+Why it is built this way: [docs/DESIGN.md](docs/DESIGN.md).
+
 ```
 $ cas put backup.tar
 3f1c...e9a2                                  # object id = Merkle root
