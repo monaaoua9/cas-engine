@@ -119,7 +119,7 @@ Defaults (Rabin; `--chunker gear` or `ChunkerConfig { algorithm: Algorithm::Gear
 
 ## Performance
 
-`cargo bench` (criterion, 32 MiB of random data, release build, one run on a Windows laptop with other things open, so treat it as a rough floor):
+`cargo bench` (criterion, 32 MiB of random data, release build, median of three runs on a Windows laptop, so treat it as a rough floor; ranges and method in [docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
 
 | Benchmark | Throughput |
 |---|---|
