@@ -30,7 +30,8 @@ impl Client {
     }
 
     fn open(mut sock: Conn, token: Option<&[u8]>) -> Result<Client> {
-        sock.set_read_timeout(Some(Duration::from_secs(60)))?;
+        // short until the server has said hello; a TLS server stays silent for a plain client
+        sock.set_read_timeout(Some(Duration::from_secs(10)))?;
         sock.set_write_timeout(Some(Duration::from_secs(60)))?;
 
         let mut hello = [0u8; 4 + 1 + 1 + 32];
@@ -60,6 +61,7 @@ impl Client {
             ST_DENIED => return Err(Error::AuthFailed),
             _ => return Err(Error::Protocol("unexpected handshake reply")),
         }
+        sock.set_read_timeout(Some(Duration::from_secs(60)))?;
         let read_only = *body.first().ok_or(Error::Protocol("short handshake reply"))? != 0;
         if wants_token {
             // the server has to know the token too, or we'd be handing data to an impostor

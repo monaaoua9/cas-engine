@@ -208,3 +208,40 @@ fn ctrl_c_stops_serve_cleanly_and_the_store_reopens() {
     // lock released, data intact
     assert!(cas(&b, &["snapshot", "verify", "one"]).status.success());
 }
+
+#[test]
+fn push_over_tls_needs_the_certificate() {
+    let d = tempfile::tempdir().unwrap();
+    let (a, b) = (d.path().join("a"), d.path().join("b"));
+    let src = tree();
+    assert!(cas(&a, &["snapshot", "create", src.path().to_str().unwrap(), "-n", "one"]).status.success());
+
+    let (cert, key) = (d.path().join("c.pem"), d.path().join("k.pem"));
+    let o = cas(
+        &a,
+        &["tls-cert", "--name", "127.0.0.1", "--cert-out", cert.to_str().unwrap(), "--key-out", key.to_str().unwrap()],
+    );
+    assert!(o.status.success(), "{}", text(&o.stderr));
+
+    let srv = serve(&b, &["--tls-cert", cert.to_str().unwrap(), "--tls-key", key.to_str().unwrap()]);
+
+    let o = cas(&a, &["--json", "push", &srv.cas, "--tls-ca", cert.to_str().unwrap()]);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    assert!(text(&o.stdout).contains("\"snapshots_sent\":1"), "{}", text(&o.stdout));
+
+    // a certificate for some other server is not trusted
+    let (cert2, key2) = (d.path().join("c2.pem"), d.path().join("k2.pem"));
+    cas(
+        &a,
+        &[
+            "tls-cert",
+            "--name",
+            "127.0.0.1",
+            "--cert-out",
+            cert2.to_str().unwrap(),
+            "--key-out",
+            key2.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(cas(&a, &["push", &srv.cas, "--tls-ca", cert2.to_str().unwrap()]).status.code(), Some(2));
+}

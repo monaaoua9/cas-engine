@@ -13,6 +13,7 @@ use cas::http::{Handler, HttpServer, Request, respond};
 use cas::json::{Json, obj};
 use cas::server::{ServeOptions, Server, Shared};
 use cas::sync::{SyncReport, copy_all, copy_snapshot};
+use cas::tls::{TlsClient, TlsServer, generate_self_signed};
 use cas::units::{human, parse_size};
 use cas::{Algorithm, Compression, Hash, Password, Result, Retention, Store, StoreConfig};
 use clap::{Parser, Subcommand};
@@ -129,6 +130,21 @@ enum Cmd {
         read_only: bool,
         #[arg(long, default_value_t = 64)]
         max_conns: usize,
+        /// PEM certificate and key: the cas listener then speaks TLS (the WebDAV and metrics ports stay plain)
+        #[arg(long, requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+        #[arg(long, requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
+    },
+    /// write a self-signed certificate and key for `serve --tls-cert`; the certificate is also the `--tls-ca` file
+    TlsCert {
+        /// host names or IP addresses clients will connect to
+        #[arg(long = "name", required = true)]
+        names: Vec<String>,
+        #[arg(long, default_value = "cas-cert.pem")]
+        cert_out: PathBuf,
+        #[arg(long, default_value = "cas-key.pem")]
+        key_out: PathBuf,
     },
     /// send snapshots (or everything) to a running `cas serve`
     Push {
@@ -138,6 +154,9 @@ enum Cmd {
         snapshot: Option<String>,
         #[arg(long)]
         token_file: Option<PathBuf>,
+        /// certificate to trust; turns TLS on for this connection
+        #[arg(long)]
+        tls_ca: Option<PathBuf>,
     },
     /// fetch snapshots (or everything) from a running `cas serve`
     Pull {
@@ -146,6 +165,8 @@ enum Cmd {
         snapshot: Option<String>,
         #[arg(long)]
         token_file: Option<PathBuf>,
+        #[arg(long)]
+        tls_ca: Option<PathBuf>,
     },
 }
 
@@ -289,6 +310,15 @@ fn run(cli: Cli) -> Result<bool> {
     let cfg = config(&cli)?;
     if let Cmd::Bench { size } = cli.cmd {
         return bench(cfg, size, &out);
+    }
+    if let Cmd::TlsCert { names, cert_out, key_out } = &cli.cmd {
+        generate_self_signed(names, cert_out, key_out)?;
+        out.emit(
+            obj([("cert", cert_out.display().to_string().into()), ("key", key_out.display().to_string().into())]),
+            "",
+            &format!("wrote {} and {}", cert_out.display(), key_out.display()),
+        );
+        return Ok(true);
     }
     let mut store = Store::open(&cli.store, cfg.clone())?;
 
@@ -535,14 +565,18 @@ fn run(cli: Cli) -> Result<bool> {
             }
             out.emit(j, &r.name, &note);
         }
-        Cmd::Serve { listen, dav_listen, metrics_listen, token_file, read_only, max_conns } => {
+        Cmd::Serve { listen, dav_listen, metrics_listen, token_file, read_only, max_conns, tls_cert, tls_key } => {
             let token = read_token(&token_file)?;
-            let opts = ServeOptions { token: token.clone(), read_only, max_conns, ..ServeOptions::default() };
+            let tls = match (tls_cert, tls_key) {
+                (Some(c), Some(k)) => Some(TlsServer::load(&c, &k)?),
+                _ => None,
+            };
+            let opts = ServeOptions { token: token.clone(), read_only, max_conns, tls, ..ServeOptions::default() };
             return serve(store, listen, dav_listen, metrics_listen, token, opts, &out);
         }
-        Cmd::Push { addr, snapshot, token_file } => {
+        Cmd::Push { addr, snapshot, token_file, tls_ca } => {
             let token = read_token(&token_file)?;
-            let mut remote = Client::connect(addr.as_str(), token.as_deref())?;
+            let mut remote = dial(&addr, token.as_deref(), &tls_ca)?;
             let rep = match snapshot {
                 Some(n) => {
                     let mut rep = SyncReport::default();
@@ -553,9 +587,9 @@ fn run(cli: Cli) -> Result<bool> {
             };
             return Ok(sync_report(&rep, &out));
         }
-        Cmd::Pull { addr, snapshot, token_file } => {
+        Cmd::Pull { addr, snapshot, token_file, tls_ca } => {
             let token = read_token(&token_file)?;
-            let mut remote = Client::connect(addr.as_str(), token.as_deref())?;
+            let mut remote = dial(&addr, token.as_deref(), &tls_ca)?;
             let rep = match snapshot {
                 Some(n) => {
                     let mut rep = SyncReport::default();
@@ -566,9 +600,18 @@ fn run(cli: Cli) -> Result<bool> {
             };
             return Ok(sync_report(&rep, &out));
         }
-        Cmd::Bench { .. } => unreachable!("handled before the store is opened"),
+        Cmd::Bench { .. } | Cmd::TlsCert { .. } => unreachable!("handled before the store is opened"),
     }
     Ok(true)
+}
+
+fn dial(addr: &str, token: Option<&[u8]>, ca: &Option<PathBuf>) -> Result<Client> {
+    let Some(ca) = ca else { return Client::connect(addr, token) };
+    let tls = TlsClient::load(ca)?;
+    let (host, port) = addr.rsplit_once(':').ok_or(cas::Error::Tls("address must be host:port".into()))?;
+    let port = port.parse().map_err(|_| cas::Error::Tls("bad port".into()))?;
+    // IPv6 literals come as [::1]:port
+    Client::connect_tls(host.trim_matches(['[', ']']), port, token, &tls)
 }
 
 fn sync_report(rep: &SyncReport, out: &Out) -> bool {
