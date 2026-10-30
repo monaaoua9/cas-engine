@@ -68,6 +68,18 @@ pub enum Error {
     #[error("store is full: the {0} byte limit would be exceeded")]
     QuotaExceeded(u64),
 
+    #[error("protocol error: {0}")]
+    Protocol(&'static str),
+
+    #[error("remote error: {0}")]
+    Remote(String),
+
+    #[error("authentication failed")]
+    AuthFailed,
+
+    #[error("server is read-only")]
+    ReadOnly,
+
     #[error("destination {0} is not empty")]
     DestNotEmpty(String),
 }

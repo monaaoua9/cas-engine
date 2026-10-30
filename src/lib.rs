@@ -24,6 +24,7 @@ pub mod store;
 pub mod transform;
 pub mod tree;
 pub mod units;
+pub mod wire;
 
 pub use chunker::{Algorithm, Chunker, ChunkerConfig};
 pub use crypto::{Kdf, Password};
