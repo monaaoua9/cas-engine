@@ -1,9 +1,18 @@
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Write};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
+use cas::client::Client;
+use cas::dav::Dav;
+use cas::http::{Handler, HttpServer, Request, respond};
 use cas::json::{Json, obj};
+use cas::server::{ServeOptions, Server, Shared};
+use cas::sync::{SyncReport, copy_all, copy_snapshot};
 use cas::units::{human, parse_size};
 use cas::{Algorithm, Compression, Hash, Password, Result, Retention, Store, StoreConfig};
 use clap::{Parser, Subcommand};
@@ -90,6 +99,54 @@ enum Cmd {
     /// directory snapshots: create, list, show, restore, diff, forget, prune
     #[command(subcommand)]
     Snapshot(Snap),
+    /// write a snapshot as a tar archive (stdout unless --out)
+    Export {
+        name: String,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
+    /// read a tar archive (stdin unless a file is given) into a new snapshot
+    Import {
+        file: Option<PathBuf>,
+        #[arg(short, long)]
+        name: Option<String>,
+    },
+    /// serve this store over TCP, and optionally as a WebDAV share and a /metrics page
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:7878")]
+        listen: SocketAddr,
+        /// read-only WebDAV view of the snapshots
+        #[arg(long)]
+        dav_listen: Option<SocketAddr>,
+        /// plain HTTP /metrics for Prometheus
+        #[arg(long)]
+        metrics_listen: Option<SocketAddr>,
+        /// file whose first line is the shared secret; without it anyone who can connect gets in
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+        /// refuse every write from clients
+        #[arg(long)]
+        read_only: bool,
+        #[arg(long, default_value_t = 64)]
+        max_conns: usize,
+    },
+    /// send snapshots (or everything) to a running `cas serve`
+    Push {
+        addr: String,
+        /// only this snapshot and what it needs
+        #[arg(long)]
+        snapshot: Option<String>,
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+    },
+    /// fetch snapshots (or everything) from a running `cas serve`
+    Pull {
+        addr: String,
+        #[arg(long)]
+        snapshot: Option<String>,
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -163,16 +220,24 @@ fn hashes(v: &[Hash]) -> Json {
     Json::Arr(v.iter().map(|h| Json::from(h.to_hex())).collect())
 }
 
-fn read_password(p: &Path) -> std::io::Result<Password> {
+fn first_line(p: &Path) -> std::io::Result<Vec<u8>> {
     let mut b = std::fs::read(p)?;
-    // editors add a newline; the password is the first line
+    // editors add a newline; the secret is the first line
     if let Some(i) = b.iter().position(|&c| c == b'\n') {
         b.truncate(i);
     }
     if b.last() == Some(&b'\r') {
         b.pop();
     }
-    Ok(Password::from(b))
+    Ok(b)
+}
+
+fn read_password(p: &Path) -> std::io::Result<Password> {
+    first_line(p).map(Password::from)
+}
+
+fn read_token(p: &Option<PathBuf>) -> std::io::Result<Option<Vec<u8>>> {
+    p.as_deref().map(first_line).transpose()
 }
 
 fn config(cli: &Cli) -> Result<StoreConfig> {
@@ -423,8 +488,177 @@ fn run(cli: Cli) -> Result<bool> {
             store.change_password(&read_password(&new_password_file)?)?;
         }
         Cmd::Snapshot(c) => return snapshot(&mut store, c, &out),
+        Cmd::Export { name, out: dest } => {
+            let r = match dest {
+                Some(p) => store.export_tar(&name, BufWriter::new(File::create(p)?))?,
+                None => store.export_tar(&name, BufWriter::new(io::stdout().lock()))?,
+            };
+            let j = obj([
+                ("files", r.files.into()),
+                ("dirs", r.dirs.into()),
+                ("symlinks", r.symlinks.into()),
+                ("bytes", r.bytes.into()),
+            ]);
+            // stdout may be the archive itself, so the summary goes to stderr
+            if out.json {
+                eprintln!("{}", j.render());
+            } else {
+                eprintln!("{} files, {} dirs, {} symlinks, {}", r.files, r.dirs, r.symlinks, human(r.bytes));
+            }
+        }
+        Cmd::Import { file, name } => {
+            let r = match file {
+                Some(p) => store.import_tar(BufReader::new(File::open(p)?), name.as_deref())?,
+                None => store.import_tar(BufReader::new(io::stdin()), name.as_deref())?,
+            };
+            let skipped: Vec<String> = r.skipped.iter().map(|p| p.display().to_string()).collect();
+            let j = obj([
+                ("name", r.name.as_str().into()),
+                ("root", r.root.to_hex().into()),
+                ("files", r.files.into()),
+                ("dirs", r.dirs.into()),
+                ("symlinks", r.symlinks.into()),
+                ("bytes", r.bytes.into()),
+                ("new_bytes", r.new_bytes.into()),
+                ("skipped", skipped.clone().into()),
+            ]);
+            let mut note = format!(
+                "{} files, {} dirs, {} symlinks, {} ({} new)",
+                r.files,
+                r.dirs,
+                r.symlinks,
+                human(r.bytes),
+                human(r.new_bytes)
+            );
+            for p in &skipped {
+                note.push_str(&format!("\nskipped {p}"));
+            }
+            out.emit(j, &r.name, &note);
+        }
+        Cmd::Serve { listen, dav_listen, metrics_listen, token_file, read_only, max_conns } => {
+            let token = read_token(&token_file)?;
+            let opts = ServeOptions { token: token.clone(), read_only, max_conns, ..ServeOptions::default() };
+            return serve(store, listen, dav_listen, metrics_listen, token, opts, &out);
+        }
+        Cmd::Push { addr, snapshot, token_file } => {
+            let token = read_token(&token_file)?;
+            let mut remote = Client::connect(addr.as_str(), token.as_deref())?;
+            let rep = match snapshot {
+                Some(n) => {
+                    let mut rep = SyncReport::default();
+                    copy_snapshot(&mut store, &mut remote, &n, &mut rep)?;
+                    rep
+                }
+                None => copy_all(&mut store, &mut remote)?,
+            };
+            return Ok(sync_report(&rep, &out));
+        }
+        Cmd::Pull { addr, snapshot, token_file } => {
+            let token = read_token(&token_file)?;
+            let mut remote = Client::connect(addr.as_str(), token.as_deref())?;
+            let rep = match snapshot {
+                Some(n) => {
+                    let mut rep = SyncReport::default();
+                    copy_snapshot(&mut remote, &mut store, &n, &mut rep)?;
+                    rep
+                }
+                None => copy_all(&mut remote, &mut store)?,
+            };
+            return Ok(sync_report(&rep, &out));
+        }
         Cmd::Bench { .. } => unreachable!("handled before the store is opened"),
     }
+    Ok(true)
+}
+
+fn sync_report(rep: &SyncReport, out: &Out) -> bool {
+    let j = obj([
+        ("objects_sent", rep.objects_sent.into()),
+        ("objects_skipped", rep.objects_skipped.into()),
+        ("chunks_sent", rep.chunks_sent.into()),
+        ("bytes_sent", rep.bytes_sent.into()),
+        ("snapshots_sent", rep.snapshots_sent.into()),
+        ("snapshots_skipped", rep.snapshots_skipped.into()),
+        ("conflicts", rep.conflicts.clone().into()),
+    ]);
+    let mut note = format!(
+        "{} objects ({} already there), {} chunks, {}; {} snapshots ({} already there)",
+        rep.objects_sent,
+        rep.objects_skipped,
+        rep.chunks_sent,
+        human(rep.bytes_sent),
+        rep.snapshots_sent,
+        rep.snapshots_skipped
+    );
+    for c in &rep.conflicts {
+        note.push_str(&format!("\nsnapshot {c} differs on the other side, left alone"));
+    }
+    out.emit(j, "", &note);
+    rep.conflicts.is_empty()
+}
+
+struct MetricsPage(Arc<Shared>);
+
+impl Handler for MetricsPage {
+    fn handle(&self, req: &Request, out: &mut dyn Write) -> io::Result<()> {
+        let head = req.method == "HEAD";
+        if !(head || req.method == "GET") || req.path != "/metrics" {
+            return respond(out, 404, &[("Content-Type", "text/plain".into())], b"not found", head);
+        }
+        match self.0.metrics_text() {
+            Ok(t) => respond(out, 200, &[("Content-Type", "text/plain; version=0.0.4".into())], t.as_bytes(), head),
+            Err(_) => respond(out, 500, &[("Content-Type", "text/plain".into())], b"error", head),
+        }
+    }
+}
+
+fn serve(
+    store: Store,
+    listen: SocketAddr,
+    dav: Option<SocketAddr>,
+    metrics: Option<SocketAddr>,
+    token: Option<Vec<u8>>,
+    opts: ServeOptions,
+    out: &Out,
+) -> Result<bool> {
+    let server = Server::bind(store, listen, opts)?;
+    let stop = server.stop_flag();
+    let shared = server.shared();
+    let mut threads = Vec::new();
+
+    let mut addrs = vec![("cas", "cas protocol", server.local_addr()?)];
+    if let Some(a) = dav {
+        let h = HttpServer::bind(a, Arc::new(Dav::new(shared.clone(), token)))?
+            .with_stop_flag(stop.clone())
+            .with_idle(Duration::from_secs(60));
+        addrs.push(("dav", "webdav", h.local_addr()?));
+        threads.push(std::thread::spawn(move || h.run()));
+    }
+    if let Some(a) = metrics {
+        let h = HttpServer::bind(a, Arc::new(MetricsPage(shared.clone())))?.with_stop_flag(stop.clone());
+        addrs.push(("metrics", "metrics", h.local_addr()?));
+        threads.push(std::thread::spawn(move || h.run()));
+    }
+
+    let flag = stop.clone();
+    ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed)).map_err(io::Error::other)?;
+
+    if out.json {
+        let j = Json::Obj(addrs.iter().map(|(k, _, a)| (k.to_string(), a.to_string().into())).collect());
+        println!("{}", j.render());
+    } else {
+        for (_, label, a) in &addrs {
+            println!("{label} on {a}");
+        }
+    }
+    io::stdout().flush()?;
+
+    let res = server.run();
+    stop.store(true, Ordering::Relaxed);
+    for t in threads {
+        let _ = t.join();
+    }
+    res?;
     Ok(true)
 }
 

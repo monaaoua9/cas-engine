@@ -14,6 +14,7 @@ argon2 = "0.6.0"
 blake3 = "1.8.7"
 chacha20poly1305 = "0.11.0"
 clap = { version = "4.6.7", features = ["derive"] }
+ctrlc = "3.5.2"
 getrandom = "0.4"
 lz4_flex = "0.14.0"
 memmap2 = "0.9.12"
