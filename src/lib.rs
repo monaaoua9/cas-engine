@@ -9,6 +9,7 @@ pub mod chunker;
 pub mod crypto;
 mod cursor;
 pub mod error;
+pub mod format;
 pub mod hash;
 pub mod index;
 pub mod manifest;
