@@ -13,6 +13,7 @@ mod cursor;
 pub mod error;
 pub mod format;
 pub mod hash;
+pub mod http;
 pub mod index;
 pub mod json;
 pub mod manifest;
