@@ -33,3 +33,33 @@ name = "chunker"
 path = "fuzz_targets/chunker.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "tree_decode"
+path = "fuzz_targets/tree_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "format_decode"
+path = "fuzz_targets/format_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wire_frame"
+path = "fuzz_targets/wire_frame.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "http_request"
+path = "fuzz_targets/http_request.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tar_import"
+path = "fuzz_targets/tar_import.rs"
+test = false
+doc = false

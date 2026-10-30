@@ -28,7 +28,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - run: cargo install cargo-fuzz --locked
       - run: |
-          for t in manifest_decode segment_scan chunker; do
+          for t in manifest_decode segment_scan chunker tree_decode format_decode wire_frame http_request tar_import; do
             cargo fuzz run $t -- -max_total_time=60
           done
 

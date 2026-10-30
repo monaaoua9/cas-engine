@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [manifest_decode, segment_scan, chunker]
+        target: [manifest_decode, segment_scan, chunker, tree_decode, format_decode, wire_frame, http_request, tar_import]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
