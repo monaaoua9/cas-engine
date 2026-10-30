@@ -7,6 +7,7 @@
 pub mod backup;
 pub mod bench;
 pub mod chunker;
+pub mod client;
 pub mod crypto;
 mod cursor;
 pub mod error;
