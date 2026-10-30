@@ -103,6 +103,7 @@ Objects are deleted by removing the manifest and decrementing one reference per 
 | `wire` | framing and message layout of the network protocol, token proofs |
 | `sync` | the `Peer` trait and the copy functions behind `push` / `pull` |
 | `server`, `client` | TCP server (thread per connection, one `RwLock` around the store) and its client |
+| `tls` | rustls wrapper for the cas port, self-signed certificate generator |
 | `http`, `timefmt` | a small HTTP/1.1 server with hard limits, and date formatting for it |
 | `dav` | read-only WebDAV over snapshots |
 | `tar` | snapshot to tar and back |
@@ -130,9 +131,10 @@ cas [-s DIR] snapshot forget <name>
 cas [-s DIR] snapshot prune [--keep-last N] [--keep-daily N] [--keep-weekly N] [--keep-monthly N] [--dry-run]
 cas [-s DIR] export <name> [-o FILE]     # tar to stdout unless -o
 cas [-s DIR] import [FILE] [-n NAME]     # tar from stdin unless a file is given
-cas [-s DIR] serve [--listen ADDR] [--dav-listen ADDR] [--metrics-listen ADDR] [--token-file F] [--read-only]
-cas [-s DIR] push ADDR [--snapshot NAME] [--token-file F]
-cas [-s DIR] pull ADDR [--snapshot NAME] [--token-file F]
+cas [-s DIR] serve [--listen ADDR] [--dav-listen ADDR] [--metrics-listen ADDR] [--token-file F] [--read-only] [--tls-cert F --tls-key F]
+cas [-s DIR] push ADDR [--snapshot NAME] [--token-file F] [--tls-ca CERT]
+cas [-s DIR] pull ADDR [--snapshot NAME] [--token-file F] [--tls-ca CERT]
+cas tls-cert --name HOST_OR_IP [--name ...] [--cert-out F] [--key-out F]
 ```
 
 As a library:
@@ -227,7 +229,7 @@ Chunks travel as they are stored. In a compressed store they stay compressed; in
 
 Access is a shared secret: `--token-file` on both ends (first line of the file). The handshake is mutual, each side proves it knows the token by keying BLAKE3 over a server nonce, so a client does not hand data to an impostor either. Without a token the server lets anyone who can connect in. `--read-only` refuses every write, and `--max-conns` caps connections. A snapshot that exists on both sides under the same name with different contents is reported as a conflict and left alone; `push` and `pull` then exit with 1.
 
-**There is no TLS.** On an untrusted network put it behind an SSH tunnel or a VPN. The token is not sent in the clear, but the data is (ciphertext, if the store is encrypted).
+**TLS.** `cas tls-cert --name 192.0.2.10 --name backup.example` writes a self-signed certificate and key. Start the server with `--tls-cert cas-cert.pem --tls-key cas-key.pem` and connect with `push ADDR --tls-ca cas-cert.pem`; the client trusts only that certificate (nothing from the system store) and checks that the host in `ADDR` is one of its names. TLS 1.2 and 1.3 through rustls with the ring backend. The token handshake still runs inside the tunnel, so TLS gives confidentiality and server identity while the token decides who may use the store. A plain client talking to a TLS server (or the other way round) fails, after up to 10 seconds in the plain-client case. There are no client certificates. Without `--tls-cert` the port is plain: use an SSH tunnel or a VPN on untrusted networks. The WebDAV and metrics ports are always plain HTTP; keep them on loopback or behind a proxy that terminates TLS.
 
 `--metrics-listen ADDR` adds a plain HTTP `/metrics` page for Prometheus. Ctrl-C stops the listeners and lets running requests finish.
 
@@ -254,7 +256,7 @@ With `--token-file` the share asks for HTTP Basic auth and takes the token as th
 | `tests/props.rs` (proptest) | random put/remove/gc/reopen sequences against a model; chunker reassembly and read-size independence; manifest and segment parsers on arbitrary bytes; truncated segment is always a clean prefix; tampered Merkle proofs |
 | `tests/crash_failpoints.rs` | the binary exits at named points inside put/rm/gc (`cargo test --features failpoints`), then the store must reopen, verify, keep committed data, and gc cleanly |
 | `tests/crash_kill.rs` | the binary is killed at arbitrary times during put and gc |
-| `tests/net.rs`, `tests/dav.rs`, `tests/tar.rs`, `tests/cli_net.rs` | sync between stores and over loopback sockets (auth, read-only, hostile frames, idle drop), WebDAV requests and ranges, tar round trips against the system `tar`, malformed archives, the `serve` / `push` / `pull` commands |
+| `tests/net.rs`, `tests/tls.rs`, `tests/dav.rs`, `tests/tar.rs`, `tests/cli_net.rs` | sync between stores and over loopback sockets, TLS (wrong CA, wrong name, plain/TLS mismatch) (auth, read-only, hostile frames, idle drop), WebDAV requests and ranges, tar round trips against the system `tar`, malformed archives, the `serve` / `push` / `pull` commands |
 | `fuzz/` | libFuzzer targets for `Manifest::decode`, `segment::scan`, both chunkers, tree and format decoding, wire frames, the HTTP request parser and the tar importer (`cargo +nightly fuzz run manifest_decode`); CI runs 60 s per target on every push; a separate `fuzz` workflow runs 30 min per target every Sunday (and on demand) and uploads the crashing input if it finds one |
 
 One failpoint test exists because of a real hazard: a put whose chunks are all already stored changes no index slot until refcounts are bumped, so the dirty flag has to be set before the manifest becomes visible. Removing that line makes `crash_on_dedup_only_put_does_not_lose_data` fail.
