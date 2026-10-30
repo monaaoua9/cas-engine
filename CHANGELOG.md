@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 - 2026-10-30
+
 - `cas serve`, `push`, `pull`: framed TCP protocol with a mutual token handshake, read-only mode, only missing chunks are sent; chunks cross the wire as stored (compressed or encrypted)
 - Read-only WebDAV share of the snapshots (`serve --dav-listen`) with Range, ETag and optional Basic auth, and an HTTP `/metrics` listener
 - `cas export` / `cas import`: snapshots as tar (ustar, GNU long names, pax on read)
