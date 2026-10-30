@@ -16,6 +16,7 @@ pub mod merkle;
 pub mod segment;
 pub mod snapshot;
 pub mod store;
+pub mod transform;
 pub mod tree;
 
 pub use chunker::{Algorithm, Chunker, ChunkerConfig};
@@ -26,3 +27,4 @@ pub use merkle::{MerkleTree, Proof};
 pub use snapshot::{Retention, Snapshot};
 pub use store::{ObjectReader, Store, StoreConfig};
 pub use tree::{Entry, Kind, Tree};
+pub use transform::Compression;
