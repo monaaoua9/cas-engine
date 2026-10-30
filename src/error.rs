@@ -65,6 +65,9 @@ pub enum Error {
     #[error("malformed FORMAT file: {0}")]
     BadFormat(&'static str),
 
+    #[error("store is full: the {0} byte limit would be exceeded")]
+    QuotaExceeded(u64),
+
     #[error("destination {0} is not empty")]
     DestNotEmpty(String),
 }

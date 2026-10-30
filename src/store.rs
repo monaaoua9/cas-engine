@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex, mpsc};
 
 use crate::chunker::{Chunker, ChunkerConfig};
@@ -12,6 +13,7 @@ use crate::hash::Hash;
 use crate::index::{Entry, Index};
 use crate::manifest::{ChunkRef, Manifest};
 use crate::merkle::Proof;
+use crate::metrics::{CounterSnapshot, Counters};
 use crate::segment::{self, Layout};
 use crate::transform::{self, Compression};
 
@@ -66,6 +68,8 @@ pub struct StoreConfig {
     pub password: Option<Password>,
     /// Key stretching cost, used when a password is set on a new store or changed.
     pub kdf: Kdf,
+    /// Writes that would take the segment files past this many bytes fail with `Error::QuotaExceeded`. gc is exempt.
+    pub max_bytes: Option<u64>,
 }
 
 impl Default for StoreConfig {
@@ -77,6 +81,7 @@ impl Default for StoreConfig {
             compression: Compression::None,
             password: None,
             kdf: Kdf::default(),
+            max_bytes: None,
         }
     }
 }
@@ -119,6 +124,19 @@ impl Stats {
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Damage {
+    pub bad_manifests: Vec<Hash>,
+    pub corrupt_chunks: Vec<Hash>,
+    pub missing_chunks: Vec<Hash>,
+}
+
+impl Damage {
+    pub fn is_empty(&self) -> bool {
+        self.bad_manifests.is_empty() && self.corrupt_chunks.is_empty() && self.missing_chunks.is_empty()
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ScrubReport {
     pub checked: u64,
@@ -143,6 +161,10 @@ pub struct Store {
     active: Option<Active>,
     next_segment: u32,
     readers: Mutex<HashMap<u32, Arc<File>>>,
+    disk_bytes: u64,
+    // gc has to copy before it can delete, so it may overshoot the quota briefly
+    in_gc: bool,
+    counters: Counters,
 }
 
 impl Store {
@@ -217,15 +239,41 @@ impl Store {
             active: None,
             next_segment: ids.last().map_or(1, |i| i + 1),
             readers: Mutex::new(HashMap::new()),
+            disk_bytes: 0,
+            in_gc: false,
+            counters: Counters::default(),
         };
         if !clean {
             s.rebuild()?;
         }
+        s.disk_bytes = s.measure_disk()?;
         Ok(s)
     }
 
     pub(crate) fn root_dir(&self) -> &Path {
         &self.root
+    }
+
+    fn measure_disk(&self) -> Result<u64> {
+        let dir = self.seg_dir();
+        let mut n = 0;
+        for id in segment::list_ids(&dir)? {
+            n += fs::metadata(segment::path(&dir, id))?.len();
+        }
+        Ok(n)
+    }
+
+    /// Bytes currently in segment files, dead chunks included.
+    pub fn disk_bytes(&self) -> u64 {
+        self.disk_bytes
+    }
+
+    pub fn max_bytes(&self) -> Option<u64> {
+        self.cfg.max_bytes
+    }
+
+    pub fn counters(&self) -> CounterSnapshot {
+        self.counters.snapshot()
     }
 
     fn seg_dir(&self) -> PathBuf {
@@ -261,11 +309,49 @@ impl Store {
             }
         }
 
-        for id in self.list()? {
-            let m = self.manifest(&id)?;
-            self.adjust_refs(&m, true)?;
-        }
+        self.recount_refs()?;
         self.index.mark_clean()?;
+        Ok(())
+    }
+
+    // refcounts are derived: one per manifest that lists the chunk
+    pub(crate) fn recount_refs(&mut self) -> Result<()> {
+        for (h, mut e) in self.index.entries() {
+            if e.refs != 0 {
+                e.refs = 0;
+                self.index.insert(&h, e)?;
+            }
+        }
+        // A manifest that fails its check, or lists a chunk that is gone, must not stop the
+        // store from opening: that is exactly when repair is needed. check() reports both.
+        for id in self.list()? {
+            match self.manifest(&id) {
+                Ok(m) => self.bump_present(&m)?,
+                Err(Error::CorruptManifest(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    fn bump_present(&mut self, m: &Manifest) -> Result<()> {
+        let uniq: HashSet<Hash> = m.chunks.iter().map(|c| c.hash).collect();
+        for h in uniq {
+            if let Some(mut e) = self.index.get(&h) {
+                e.refs = e.refs.saturating_add(1);
+                self.index.insert(&h, e)?;
+            }
+        }
+        Ok(())
+    }
+
+    // Used by repair when refcounts can't be recomputed: a restored chunk with no reference would be
+    // collected by the next gc.
+    pub(crate) fn pin_chunk(&mut self, h: &Hash) -> Result<()> {
+        if let Some(mut e) = self.index.get(h) {
+            e.refs = e.refs.max(1);
+            self.index.insert(h, e)?;
+        }
         Ok(())
     }
 
@@ -324,6 +410,13 @@ impl Store {
 
     fn append_raw(&mut self, hash: &Hash, codec: u8, payload: &[u8]) -> Result<Entry> {
         let rec = self.layout.record_len(payload.len() as u32);
+        if let Some(max) = self.cfg.max_bytes
+            && !self.in_gc
+            && self.disk_bytes + rec > max
+        {
+            self.counters.quota_rejections.fetch_add(1, Relaxed);
+            return Err(Error::QuotaExceeded(max));
+        }
         let full = self.active.as_ref().is_some_and(|a| a.len > 0 && a.len + rec > self.cfg.segment_size);
         if self.active.is_none() {
             self.open_active(true)?;
@@ -339,6 +432,7 @@ impl Store {
         a.file.write_all(&bytes)?;
         let e = Entry { segment: a.id, offset: a.len, len: payload.len() as u32, refs: 0 };
         a.len += rec;
+        self.disk_bytes += rec;
         Ok(e)
     }
 
@@ -399,6 +493,20 @@ impl Store {
             return Ok(report);
         }
 
+        let file = self.seal_meta(b"manifest", id.as_bytes(), m.encode());
+        self.install_manifest(&id, &m, &file)?;
+
+        let c = &self.counters;
+        c.puts.fetch_add(1, Relaxed);
+        c.put_bytes.fetch_add(m.size, Relaxed);
+        c.chunks_written.fetch_add(new_chunks, Relaxed);
+        c.chunks_deduped.fetch_add(report.chunks - new_chunks, Relaxed);
+        Ok(report)
+    }
+
+    // `file` is exactly what goes on disk (already sealed for encrypted stores)
+    fn install_manifest(&mut self, id: &Hash, m: &Manifest, file: &[u8]) -> Result<()> {
+        let path = self.manifest_path(id);
         // chunk bytes must be durable before a manifest can point at them
         if let Some(a) = &self.active {
             a.file.sync_data()?;
@@ -407,16 +515,72 @@ impl Store {
         let tmp = path.with_extension("tmp");
         {
             let mut f = File::create(&tmp)?;
-            f.write_all(&self.seal_meta(b"manifest", id.as_bytes(), m.encode()))?;
+            f.write_all(file)?;
             f.sync_all()?;
         }
         fs::rename(&tmp, &path)?;
         sync_dir(&self.root.join("manifests"))?;
         fail("put:manifest_renamed");
 
-        self.adjust_refs(&m, true)?;
+        self.adjust_refs(m, true)?;
         fail("put:refs_bumped");
-        Ok(report)
+        Ok(())
+    }
+
+    pub fn has_chunk(&self, h: &Hash) -> bool {
+        self.index.get(h).is_some()
+    }
+
+    /// A chunk as stored (codec byte and payload), checked against its record header but not decoded.
+    /// Together with `write_chunk_raw` this moves chunks between stores without recompressing or re-encrypting.
+    pub fn read_chunk_raw(&self, h: &Hash) -> Result<(u8, Vec<u8>)> {
+        self.load(h)
+    }
+
+    /// Adds a chunk received from elsewhere. It is decoded and re-hashed first, so a store that
+    /// doesn't share this store's keys rejects it. Returns false when the chunk was already
+    /// here and `replace` is not set. A replaced chunk keeps its reference count.
+    pub fn write_chunk_raw(&mut self, h: &Hash, codec: u8, payload: Vec<u8>, replace: bool) -> Result<bool> {
+        if !replace && self.index.get(h).is_some() {
+            return Ok(false);
+        }
+        let plain = self.decode(h, codec, payload.clone())?;
+        self.index.mark_dirty();
+        let e = match self.layout {
+            Layout::V2 => self.append_raw(h, codec, &payload)?,
+            Layout::V1 => self.append(h, &plain)?,
+        };
+        let refs = self.index.get(h).map_or(0, |o| o.refs);
+        self.index.insert(h, Entry { refs, ..e })?;
+        Ok(true)
+    }
+
+    /// The manifest file exactly as stored.
+    pub fn manifest_bytes(&self, id: &Hash) -> Result<Vec<u8>> {
+        match fs::read(self.manifest_path(id)) {
+            Ok(b) => Ok(b),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::NotFound(*id)),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Installs a manifest file received from elsewhere, after checking it decodes, hashes to `id`
+    /// and that every chunk it lists is here. False if the object already existed.
+    pub fn put_manifest_bytes(&mut self, id: &Hash, raw: Vec<u8>) -> Result<bool> {
+        if self.manifest_path(id).exists() {
+            return Ok(false);
+        }
+        let plain = self.open_meta(b"manifest", id.as_bytes(), raw.clone()).ok_or(Error::CorruptManifest(*id))?;
+        let m = Manifest::decode(&plain).map_err(|_| Error::CorruptManifest(*id))?;
+        if m.id() != *id {
+            return Err(Error::CorruptManifest(*id));
+        }
+        if let Some(c) = m.chunks.iter().find(|c| self.index.get(&c.hash).is_none()) {
+            return Err(Error::MissingChunk(c.hash));
+        }
+        self.index.mark_dirty();
+        self.install_manifest(id, &m, &raw)?;
+        Ok(true)
     }
 
     pub fn put_bytes(&mut self, data: &[u8]) -> Result<PutReport> {
@@ -499,8 +663,18 @@ impl Store {
 
     /// Reads one chunk, undoes compression and encryption, and re-hashes it; a mismatch is `Error::Corrupt`.
     pub fn get_chunk(&self, h: &Hash) -> Result<Vec<u8>> {
-        let (codec, payload) = self.load(h)?;
-        self.decode(h, codec, payload)
+        let r = self.load(h).and_then(|(codec, payload)| self.decode(h, codec, payload));
+        match &r {
+            Ok(d) => {
+                self.counters.chunk_reads.fetch_add(1, Relaxed);
+                self.counters.bytes_read.fetch_add(d.len() as u64, Relaxed);
+            }
+            Err(Error::Corrupt(_)) => {
+                self.counters.corrupt_seen.fetch_add(1, Relaxed);
+            }
+            Err(_) => {}
+        }
+        r
     }
 
     // ids are keyed hashes in an encrypted store, so nobody without the key can confirm a file is in it
@@ -628,6 +802,36 @@ impl Store {
         Ok(rep)
     }
 
+    /// Everything wrong that can be found without changing anything: manifests that fail their
+    /// check, chunks that fail theirs (referenced or not), and chunks a good manifest lists
+    /// that the index doesn't have.
+    pub fn check(&self) -> Result<Damage> {
+        let mut d = Damage::default();
+        let mut wanted = HashSet::new();
+        for id in self.list()? {
+            match self.manifest(&id) {
+                Ok(m) => wanted.extend(m.chunks.iter().map(|c| c.hash)),
+                Err(Error::CorruptManifest(_)) => d.bad_manifests.push(id),
+                Err(e) => return Err(e),
+            }
+        }
+        d.missing_chunks = wanted.into_iter().filter(|h| self.index.get(h).is_none()).collect();
+        d.missing_chunks.sort();
+        d.corrupt_chunks = self.scrub()?.corrupt;
+        d.corrupt_chunks.sort();
+        Ok(d)
+    }
+
+    pub(crate) fn chunk_segment(&self, h: &Hash) -> Option<u32> {
+        self.index.get(h).map(|e| e.segment)
+    }
+
+    pub(crate) fn drop_manifest_file(&self, id: &Hash) -> Result<()> {
+        fs::remove_file(self.manifest_path(id))?;
+        sync_dir(&self.root.join("manifests"))?;
+        Ok(())
+    }
+
     pub fn stats(&self) -> Result<Stats> {
         let mut st = Stats::default();
         for id in self.list()? {
@@ -651,6 +855,16 @@ impl Store {
     /// live chunks of mostly-dead segments into a fresh one and deleting the
     /// old files. Segments under the threshold are left alone.
     pub fn gc(&mut self) -> Result<GcReport> {
+        self.gc_segments(&HashSet::new())
+    }
+
+    // `force` segments are rewritten whatever their dead fraction is
+    pub(crate) fn gc_segments(&mut self, force: &HashSet<u32>) -> Result<GcReport> {
+        // chunks only an unreadable manifest refers to look unreferenced; deleting them would make the damage permanent
+        for id in self.list()? {
+            self.manifest(&id)?;
+        }
+        self.counters.gc_runs.fetch_add(1, Relaxed);
         #[derive(Default)]
         struct Tally {
             live: u64,
@@ -671,19 +885,25 @@ impl Store {
             a.file.sync_data()?;
         }
 
-        let victims: Vec<u32> = tally
+        let dir = self.seg_dir();
+        let mut victims: Vec<u32> = tally
             .iter()
             .filter(|(_, t)| {
                 t.dead > 0 && (t.live == 0 || t.dead as f64 / (t.live + t.dead) as f64 >= self.cfg.gc_threshold)
             })
             .map(|(&id, _)| id)
             .collect();
+        for id in force {
+            if !victims.contains(id) && segment::path(&dir, *id).exists() {
+                victims.push(*id);
+            }
+        }
+        victims.sort_unstable();
 
         let mut rep = GcReport::default();
         if victims.is_empty() {
             return Ok(rep);
         }
-        let dir = self.seg_dir();
         let mut before = 0u64;
         for &id in &victims {
             before += fs::metadata(segment::path(&dir, id))?.len();
@@ -706,16 +926,22 @@ impl Store {
 
         // never append into a segment we are about to delete
         self.open_active(false)?;
+        self.in_gc = true;
         let mut moved = 0u64;
-        for (h, old) in live {
-            // decode first so a rotten chunk stops the gc before its only copy is deleted
-            let (codec, payload) = self.load(&h)?;
-            self.decode(&h, codec, payload.clone())?;
-            let ne = self.append_raw(&h, codec, &payload)?;
-            self.index.insert(&h, Entry { refs: old.refs, ..ne })?;
-            moved += self.layout.record_len(old.len);
-            rep.chunks_moved += 1;
-        }
+        let copied = (|| -> Result<()> {
+            for (h, old) in live {
+                // decode first so a rotten chunk stops the gc before its only copy is deleted
+                let (codec, payload) = self.load(&h)?;
+                self.decode(&h, codec, payload.clone())?;
+                let ne = self.append_raw(&h, codec, &payload)?;
+                self.index.insert(&h, Entry { refs: old.refs, ..ne })?;
+                moved += self.layout.record_len(old.len);
+                rep.chunks_moved += 1;
+            }
+            Ok(())
+        })();
+        self.in_gc = false;
+        copied?;
         if let Some(a) = &self.active {
             a.file.sync_data()?;
         }
@@ -731,6 +957,7 @@ impl Store {
         sync_dir(&dir)?;
         rep.segments_removed = victims.len() as u64;
         rep.bytes_reclaimed = before.saturating_sub(moved);
+        self.disk_bytes = self.measure_disk()?;
 
         self.sync()?;
         Ok(rep)

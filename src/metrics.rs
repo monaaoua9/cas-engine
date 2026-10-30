@@ -54,7 +54,13 @@ fn metric(out: &mut String, name: &str, kind: &str, help: &str, v: impl std::fmt
 
 /// Prometheus text exposition format. `disk_bytes` and `max_bytes` come from
 /// the store; `extra` lets a server add its own counters.
-pub fn prometheus(st: &Stats, c: &CounterSnapshot, disk_bytes: u64, max_bytes: Option<u64>, extra: &[(&str, &str, u64)]) -> String {
+pub fn prometheus(
+    st: &Stats,
+    c: &CounterSnapshot,
+    disk_bytes: u64,
+    max_bytes: Option<u64>,
+    extra: &[(&str, &str, u64)],
+) -> String {
     let mut o = String::new();
     metric(&mut o, "objects", "gauge", "objects stored", st.objects);
     metric(&mut o, "logical_bytes", "gauge", "sum of object sizes before dedup", st.logical_bytes);
