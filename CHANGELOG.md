@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Directory snapshots: `cas snapshot create/ls/show/restore/diff/verify/forget/prune`, tree objects, retention rules (keep-last/daily/weekly/monthly)
 - Gear (FastCDC-style) chunker as an alternative to Rabin, `--chunker gear` on the CLI; about 2x faster
 - Weekly 30-minute fuzz run in its own workflow, uploads crash inputs; the CI badge is not affected by it
 - API docs, SECURITY.md, CI jobs for docs and MSRV 1.89; cargo-audit runs weekly in its own workflow so a new advisory does not turn the CI badge red

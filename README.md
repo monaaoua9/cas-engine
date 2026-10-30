@@ -88,6 +88,9 @@ Objects are deleted by removing the manifest and decrementing one reference per 
 | `segment` | record format, scanning, positional reads |
 | `index` | mmap hash table (the only `unsafe` in the crate, one call) |
 | `store` | put / get / remove / verify / scrub / gc / stats |
+| `tree` | directory listing format (sorted entries, modes, mtimes, symlinks), stored as an ordinary object |
+| `snapshot` | named snapshot records and the keep-last / daily / weekly / monthly retention rules |
+| `backup` | snapshot a directory, restore, diff, verify, forget, prune |
 | `main.rs` | `cas` command line |
 
 ## Usage
@@ -101,6 +104,12 @@ cas [-s DIR] verify [id]       # no id: every manifest and every chunk
 cas [-s DIR] prove <id> <n>
 cas [-s DIR] gc
 cas [-s DIR] stats
+cas [-s DIR] snapshot create <dir> [-n NAME]
+cas [-s DIR] snapshot ls | show <name> | verify <name>
+cas [-s DIR] snapshot restore <name> <dest>
+cas [-s DIR] snapshot diff <a> <b>
+cas [-s DIR] snapshot forget <name>
+cas [-s DIR] snapshot prune [--keep-last N] [--keep-daily N] [--keep-weekly N] [--keep-monthly N] [--dry-run]
 ```
 
 As a library:
@@ -135,6 +144,23 @@ Both algorithms behave the same way (min/avg/max sizes, resync after an insertio
 Chunking runs on its own thread, so hashing and segment writes overlap with it. This machine is noisy: the same Rabin benchmark has read anywhere from 170 to 380 MiB/s on different runs, so compare ratios inside one table, not numbers across runs. `cargo bench` on your own hardware is the real answer.
 
 The chunker is the bottleneck: each byte depends on the previous fingerprint through a table lookup, so it cannot be vectorised. The window is the input slice itself (no ring buffer) and the first `min_size - 48` bytes of every chunk are skipped, which together doubled its speed.
+
+## Snapshots
+
+`cas snapshot create <dir>` stores a whole directory. Every file is an ordinary object; every directory is a tree object, a sorted list of `(name, kind, mode, mtime, size, id)` entries stored through the same chunker and manifests as everything else. A directory's id therefore depends only on its contents, so an unchanged subtree has the same id in every snapshot and costs nothing, and `snapshot diff` skips equal ids without descending. A snapshot is a small record in `snapshots/<name>.snap`: the root tree id, the time, the source path, and the list of objects it reaches.
+
+```
+store/
+  snapshots/<name>.snap   name, time, root tree id, members (id + created flag), checksum
+```
+
+Names inside a tree are checked on creation and again on decode: no `/`, `\`, NUL, `.` or `..`, strictly sorted, no duplicates, so a hostile store cannot make `restore` write outside the destination. Restore refuses a destination that is not empty and never writes through an existing path.
+
+Forgetting a snapshot releases only the objects it created. Each member carries a `created` flag, set when the snapshot was the one that added the object (or inherited from an earlier snapshot that did). An object you stored with `cas put` before the snapshot saw it is never removed by a forget. The reverse is a limit: if you `put` bytes identical to something a snapshot created, forgetting that snapshot removes it. Space is returned by `cas gc` as usual.
+
+`prune` keeps the union of the rules: the newest N snapshots, plus the newest snapshot of each of the last N days, ISO weeks (Monday start) and months. An empty policy is an error rather than "delete everything".
+
+Not covered: hard links are stored as separate files, owners and extended attributes are not recorded, sockets and devices are skipped (listed in the create output), and symlinks are restored on Unix only.
 
 ## Reading
 
