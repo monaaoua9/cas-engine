@@ -120,3 +120,77 @@ fn bad_pem_files_are_errors() {
     assert!(TlsClient::load(&junk).is_err());
     assert!(TlsClient::load(&d.path().join("missing")).is_err());
 }
+
+fn https_get(port: u16, host: &str, path: &str, ca: &std::path::Path) -> std::io::Result<String> {
+    use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
+    use std::io::{Read, Write};
+
+    let mut roots = rustls::RootCertStore::empty();
+    for c in CertificateDer::pem_file_iter(ca).unwrap() {
+        roots.add(c.unwrap()).unwrap();
+    }
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let cfg = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let conn = rustls::ClientConnection::new(cfg.into(), ServerName::try_from(host.to_owned()).unwrap()).unwrap();
+    let sock = std::net::TcpStream::connect(("127.0.0.1", port))?;
+    sock.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut tls = rustls::StreamOwned::new(conn, sock);
+    write!(tls, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?;
+    let mut body = Vec::new();
+    // the server closes without close_notify when it drops the socket; what was read is still valid
+    let _ = tls.read_to_end(&mut body);
+    if body.is_empty() {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+#[test]
+fn webdav_over_https() {
+    use cas::dav::Dav;
+    use cas::http::HttpServer;
+
+    let pki = Pki::new(&["127.0.0.1"]);
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("a.txt"), b"hello tls").unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let mut st = Store::open(d.path(), cfg()).unwrap();
+    st.snapshot_dir(src.path(), Some("one")).unwrap();
+
+    let server = Server::bind(st, "127.0.0.1:0", ServeOptions::default()).unwrap();
+    let h = HttpServer::bind("127.0.0.1:0", std::sync::Arc::new(Dav::new(server.shared(), None)))
+        .unwrap()
+        .with_tls(pki.server())
+        .with_idle(Duration::from_secs(2));
+    let port = h.local_addr().unwrap().port();
+    let stop = h.stop_flag();
+    let t = std::thread::spawn(move || h.run());
+
+    let ca = pki.dir.path().join("c.pem");
+    let page = https_get(port, "127.0.0.1", "/one/a.txt", &ca).unwrap();
+    assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+    assert!(page.ends_with("hello tls"));
+
+    // a keep-alive-less request for a directory listing works the same way
+    let idx = https_get(port, "127.0.0.1", "/one/", &ca).unwrap();
+    assert!(idx.contains("a.txt"));
+
+    // the wrong CA is refused during the handshake
+    let other = Pki::new(&["127.0.0.1"]);
+    assert!(https_get(port, "127.0.0.1", "/", &other.dir.path().join("c.pem")).is_err());
+
+    // plain HTTP to the HTTPS port gets no usable answer
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    std::io::Write::write_all(&mut s, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    let mut buf = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut s, &mut buf);
+    assert!(!String::from_utf8_lossy(&buf).starts_with("HTTP/1.1 200"));
+
+    stop.store(true, Ordering::Relaxed);
+    t.join().unwrap().unwrap();
+}
