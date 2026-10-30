@@ -59,7 +59,8 @@ Leaf and node hashes carry different one-byte prefixes, and an odd node at the e
 store/
   LOCK                 exclusive file lock, one process at a time
   index.bin            mmap'd open-addressing hash table (rebuildable cache)
-  segments/seg-N.dat   append-only: [hash 32][len u32][payload] ...
+  FORMAT               version, and the wrapped master key when encrypted
+  segments/seg-N.dat   append-only: [hash 32][len u32][codec u8][payload][sum 8] ...
   manifests/<id>.mf    immutable, written tmp + fsync + rename
 ```
 
@@ -69,7 +70,7 @@ store/
 | manifests | ordered chunk list + trailer checksum | which chunks belong to which object |
 | index.bin | hash -> (segment, offset, len, refcount) | nothing, it is derived |
 
-Because the index is derived, recovery is simple: a header flag records a clean shutdown. If it is missing (crash, deleted file) the store rescans segments (re-hashing every payload, truncating a torn tail on the newest segment) and recomputes refcounts from the manifests. A torn write in the middle of an older segment is reported, never silently cut.
+Because the index is derived, recovery is simple: a header flag records a clean shutdown. If it is missing (crash, deleted file) the store rescans segments (checking every record, truncating a torn tail on the newest segment) and recomputes refcounts from the manifests. A torn write in the middle of an older segment is reported, never silently cut.
 
 Write ordering for `put`: chunk bytes are fsynced, then the manifest is renamed into place, then refcounts are bumped. A crash at any point leaves either nothing visible or a rebuildable store; the index is marked dirty before refcounts can be wrong, so GC never sees undercounted data.
 
@@ -85,7 +86,10 @@ Objects are deleted by removing the manifest and decrementing one reference per 
 | `hash` | 32-byte BLAKE3 digest newtype, hex parse/print |
 | `merkle` | tree, inclusion proofs, verification |
 | `manifest` | object recipe + binary encoding with checksum |
-| `segment` | record format, scanning, positional reads |
+| `segment` | record layouts (v1, v2), scanning, positional reads |
+| `transform` | per-chunk lz4 and encryption, undone on read |
+| `crypto` | XChaCha20-Poly1305 sealing, Argon2id key stretching, keyed chunk ids |
+| `format` | the FORMAT file: store version and password-wrapped master key |
 | `index` | mmap hash table (the only `unsafe` in the crate, one call) |
 | `store` | put / get / remove / verify / scrub / gc / stats |
 | `tree` | directory listing format (sorted entries, modes, mtimes, symlinks), stored as an ordinary object |
@@ -145,6 +149,24 @@ Chunking runs on its own thread, so hashing and segment writes overlap with it. 
 
 The chunker is the bottleneck: each byte depends on the previous fingerprint through a table lookup, so it cannot be vectorised. The window is the input slice itself (no ring buffer) and the first `min_size - 48` bytes of every chunk are skipped, which together doubled its speed.
 
+## Compression and encryption
+
+Every v2 record carries a codec byte, so a store can hold a mix and nothing has to be rewritten to change settings.
+
+```
+cas --compress lz4 put big.log
+cas --password-file pw.txt put secrets.tar      # new store: becomes encrypted
+cas --password-file pw.txt passwd --new-password-file new.txt
+```
+
+**Compression** is lz4 per chunk, applied only when it saves space (chunks that don't shrink are stored raw). It runs before encryption. `stats` reports sizes on disk, so the dedup ratio includes it.
+
+**Encryption** is XChaCha20-Poly1305 with a random 192-bit nonce per chunk. The chunk id is bound into the ciphertext as associated data, so a chunk can't be replayed under another id. Chunk ids become BLAKE3 keyed hashes: without the key you can't test whether a file you already have is in the store, yet dedup inside the store works as before. A random master key is wrapped by a key stretched from the password with Argon2id (64 MiB, 3 passes by default; the cost is stored in FORMAT). `cas passwd` rewraps 72 bytes and touches no chunk. Manifests and snapshot records are sealed the same way, with their own id or name as associated data, so swapping one file for another is detected.
+
+Encryption is decided when the store is created. A password given for an existing plain store is an error, not a silent no-op, and so is a missing or wrong password for an encrypted one.
+
+**Older stores.** A store without a FORMAT file (written before v2) is opened with the old record layout: it reads and writes as before, and compression and encryption don't apply to it.
+
 ## Snapshots
 
 `cas snapshot create <dir>` stores a whole directory. Every file is an ordinary object; every directory is a tree object, a sorted list of `(name, kind, mode, mtime, size, id)` entries stored through the same chunker and manifests as everything else. A directory's id therefore depends only on its contents, so an unchanged subtree has the same id in every snapshot and costs nothing, and `snapshot diff` skips equal ids without descending. A snapshot is a small record in `snapshots/<name>.snap`: the root tree id, the time, the source path, and the list of objects it reaches.
@@ -182,7 +204,8 @@ One failpoint test exists because of a real hazard: a put whose chunks are all a
 ## Limits and non-goals
 
 - Single writer per store (file lock).
-- No encryption or compression; chunks are stored as-is. Both would sit in the segment record format and are left out on purpose.
+- Encryption covers chunk contents, manifests, trees and snapshot records. It does not hide the number and sizes of chunks per object, how many objects there are, snapshot names (they are file names), or timing. Keys are not zeroed in memory on drop.
+- There is no key file or recovery path: lose the password and the data is gone.
 - Directory fsync after rename/unlink is done on Unix; on Windows it is a no-op because there is no equivalent call.
 - The crash tests kill the process, not the machine, so they do not cover the OS losing unsynced pages on power failure.
 - Chunking is one serial thread by nature; hashing and I/O are a second thread. A single `put` does not scale past two cores.
