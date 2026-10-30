@@ -166,6 +166,8 @@ Both algorithms behave the same way (min/avg/max sizes, resync after an insertio
 
 Chunking runs on its own thread, so hashing and segment writes overlap with it. This machine is noisy: the same Rabin benchmark has read anywhere from 170 to 380 MiB/s on different runs, so compare ratios inside one table, not numbers across runs. `cargo bench` on your own hardware is the real answer.
 
+**Where these numbers come from.** They were measured on a low-spec laptop (i5-8365U, 8 GB RAM, Windows 11) with about six terminals open and a system drive that was nearly full. Under that load timings swing by 2-5x between runs, so the figures are medians of several runs, old and new compared interleaved in one session, and they say more about ratios than about absolute speed. Expect a quieter machine to do better; don't read any single number here as a guarantee.
+
 The chunker is the bottleneck: each byte depends on the previous fingerprint through a table lookup, so it cannot be vectorised. The window is the input slice itself (no ring buffer) and the first `min_size - 48` bytes of every chunk are skipped, which together doubled its speed.
 
 ## Checking, repair, limits, metrics
