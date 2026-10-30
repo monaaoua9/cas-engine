@@ -53,6 +53,18 @@ pub enum Error {
     #[error("snapshot {0} failed its integrity check")]
     CorruptSnapshot(String),
 
+    #[error("store is encrypted, a password is required")]
+    PasswordRequired,
+
+    #[error("wrong password")]
+    WrongPassword,
+
+    #[error("store is not encrypted")]
+    NotEncrypted,
+
+    #[error("malformed FORMAT file: {0}")]
+    BadFormat(&'static str),
+
     #[error("destination {0} is not empty")]
     DestNotEmpty(String),
 }

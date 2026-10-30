@@ -6,6 +6,7 @@
 
 pub mod backup;
 pub mod chunker;
+pub mod crypto;
 mod cursor;
 pub mod error;
 pub mod hash;
