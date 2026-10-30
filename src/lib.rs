@@ -26,6 +26,7 @@ pub mod server;
 pub mod snapshot;
 pub mod store;
 pub mod sync;
+pub mod tar;
 pub mod timefmt;
 pub mod transform;
 pub mod tree;

@@ -68,6 +68,9 @@ pub enum Error {
     #[error("store is full: the {0} byte limit would be exceeded")]
     QuotaExceeded(u64),
 
+    #[error("bad tar archive: {0}")]
+    BadTar(&'static str),
+
     #[error("protocol error: {0}")]
     Protocol(&'static str),
 
