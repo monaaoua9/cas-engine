@@ -12,6 +12,7 @@ pub mod error;
 pub mod format;
 pub mod hash;
 pub mod index;
+pub mod json;
 pub mod manifest;
 pub mod merkle;
 pub mod segment;
