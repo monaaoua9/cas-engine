@@ -258,6 +258,16 @@ fn read_request(r: &mut impl BufRead) -> io::Result<Parsed> {
     Ok(Parsed::Req(req, keep))
 }
 
+/// Parses one request the way the server does. `Ok(Err(status))` is a request the server
+/// would answer with that error code, `Ok(Ok(None))` is a clean end of input.
+pub fn parse_request(r: &mut impl BufRead) -> io::Result<std::result::Result<Option<Request>, u16>> {
+    Ok(match read_request(r)? {
+        Parsed::Req(req, _) => Ok(Some(req)),
+        Parsed::Closed => Ok(None),
+        Parsed::Bad(code) => Err(code),
+    })
+}
+
 fn serve_conn(sock: TcpStream, h: &dyn Handler, stop: &AtomicBool, idle: Duration) -> io::Result<()> {
     sock.set_nonblocking(false)?;
     sock.set_read_timeout(Some(idle))?;
