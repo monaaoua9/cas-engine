@@ -94,6 +94,11 @@ Objects are deleted by removing the manifest and decrementing one reference per 
 | `store` | put / get / remove / verify / scrub / gc / stats |
 | `tree` | directory listing format (sorted entries, modes, mtimes, symlinks), stored as an ordinary object |
 | `snapshot` | named snapshot records and the keep-last / daily / weekly / monthly retention rules |
+| `repair` | heal a store from a second copy |
+| `metrics` | event counters and Prometheus text |
+| `json` | the JSON writer behind `--json` |
+| `units` | `64K` / `10GiB` parsing and `human()` |
+| `bench` | the `cas bench` timings |
 | `backup` | snapshot a directory, restore, diff, verify, forget, prune |
 | `main.rs` | `cas` command line |
 
@@ -108,6 +113,9 @@ cas [-s DIR] verify [id]       # no id: every manifest and every chunk
 cas [-s DIR] prove <id> <n>
 cas [-s DIR] gc
 cas [-s DIR] stats
+cas [-s DIR] check | repair --from OTHER_COPY
+cas [-s DIR] metrics
+cas bench [--size 64M]
 cas [-s DIR] snapshot create <dir> [-n NAME]
 cas [-s DIR] snapshot ls | show <name> | verify <name>
 cas [-s DIR] snapshot restore <name> <dest>
@@ -148,6 +156,20 @@ Both algorithms behave the same way (min/avg/max sizes, resync after an insertio
 Chunking runs on its own thread, so hashing and segment writes overlap with it. This machine is noisy: the same Rabin benchmark has read anywhere from 170 to 380 MiB/s on different runs, so compare ratios inside one table, not numbers across runs. `cargo bench` on your own hardware is the real answer.
 
 The chunker is the bottleneck: each byte depends on the previous fingerprint through a table lookup, so it cannot be vectorised. The window is the input slice itself (no ring buffer) and the first `min_size - 48` bytes of every chunk are skipped, which together doubled its speed.
+
+## Checking, repair, limits, metrics
+
+`cas check` reports what is wrong without touching anything: manifests that fail their checksum, chunks that fail theirs (whether or not an object uses them), and chunks a good manifest lists that the index doesn't have. A store with damage still opens, because opening is what you need in order to fix it; `gc` is the exception and refuses to run while a manifest is unreadable, since chunks only that manifest refers to would look unused.
+
+`cas repair --from OTHER` takes a second copy that shares chunk ids (a copy of the directory, or a replica made by push/pull; an independently created encrypted store has different keys and different ids, so it can't help). Every chunk and manifest it supplies is decoded and re-hashed before it replaces the bad one, then the segments that held bad bytes are rewritten so the damage is off the disk, not just out of the index. Whatever the copy can't supply is listed and left alone.
+
+`--max-size 10GiB` makes writes fail with `store is full` once the segment files would pass that size. Removing objects doesn't free disk until `gc`; `gc` itself is exempt so a full store can always be compacted. Dedup hits write nothing and never fail on quota.
+
+`cas metrics` prints Prometheus text: gauges from the store (objects, live/dead chunks and bytes, disk bytes, quota, dedup ratio) and counters for the current process (puts, chunk reads, corrupt reads, gc runs, quota rejections). The counters are only interesting inside a long-running process such as `cas serve`.
+
+`--json` on any command prints one JSON document on stdout instead of text; exit codes are the same (0 ok, 1 a check or diff found something, 2 error).
+
+`cas bench` times chunking, BLAKE3, put and get on random data in a scratch directory and removes it afterwards; it honours `--chunker`, `--compress` and `--password-file`.
 
 ## Compression and encryption
 

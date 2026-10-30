@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `cas check` and `cas repair --from`, `--max-size` quota, `cas metrics` (Prometheus), `--json` on every command, `cas bench`
 - Per-chunk lz4 compression (`--compress lz4`) and encryption (XChaCha20-Poly1305, Argon2id, keyed chunk ids; `--password-file`, `cas passwd`); new v2 record layout with a FORMAT file, stores written before it keep working
 - Directory snapshots: `cas snapshot create/ls/show/restore/diff/verify/forget/prune`, tree objects, retention rules (keep-last/daily/weekly/monthly)
 - Gear (FastCDC-style) chunker as an alternative to Rabin, `--chunker gear` on the CLI; about 2x faster
