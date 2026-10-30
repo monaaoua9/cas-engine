@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 
 use crate::chunker::{Chunker, ChunkerConfig};
+use crate::crypto::{Kdf, Keys, Password};
 use crate::error::{Error, Result};
+use crate::format::Format;
 use crate::hash::Hash;
 use crate::index::{Entry, Index};
 use crate::manifest::{ChunkRef, Manifest};
 use crate::merkle::Proof;
-use crate::segment;
+use crate::segment::{self, Layout};
+use crate::transform::{self, Compression};
 
 // Test hook: with the `failpoints` feature, the process dies without running
 // destructors when CAS_FAILPOINT names the point, like a kill -9 would.
@@ -57,11 +60,24 @@ pub struct StoreConfig {
     pub segment_size: u64,
     /// A sealed segment is rewritten by gc once this fraction of its bytes is dead.
     pub gc_threshold: f64,
+    /// Applied to chunks written from now on; each record says how it was stored, so this can change between runs.
+    pub compression: Compression,
+    /// Required to open an encrypted store. Given when creating a new store, it makes the store encrypted.
+    pub password: Option<Password>,
+    /// Key stretching cost, used when a password is set on a new store or changed.
+    pub kdf: Kdf,
 }
 
 impl Default for StoreConfig {
     fn default() -> Self {
-        StoreConfig { chunker: ChunkerConfig::default(), segment_size: 64 << 20, gc_threshold: 0.3 }
+        StoreConfig {
+            chunker: ChunkerConfig::default(),
+            segment_size: 64 << 20,
+            gc_threshold: 0.3,
+            compression: Compression::None,
+            password: None,
+            kdf: Kdf::default(),
+        }
     }
 }
 
@@ -72,6 +88,8 @@ pub struct PutReport {
     pub chunks: u64,
     pub new_chunks: u64,
     pub new_bytes: u64,
+    /// What the new chunks took in the segment payloads, after compression and encryption.
+    pub stored_bytes: u64,
     /// The whole object was already stored; nothing was written.
     pub existed: bool,
 }
@@ -118,6 +136,9 @@ pub struct Store {
     root: PathBuf,
     cfg: StoreConfig,
     _lock: File,
+    layout: Layout,
+    format: Format,
+    keys: Option<Keys>,
     index: Index,
     active: Option<Active>,
     next_segment: u32,
@@ -156,12 +177,42 @@ impl Store {
             }
         }
 
-        let (index, clean) = Index::open(&root.join("index.bin"))?;
         let ids = segment::list_ids(&root.join("segments"))?;
+        let (format, layout, mut keys) = match fs::read(root.join("FORMAT")) {
+            Ok(b) => (Format::decode(&b)?, Layout::V2, None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                // no FORMAT but data present: written before v2 existed
+                let used = !ids.is_empty() || fs::read_dir(root.join("manifests"))?.next().is_some();
+                if used {
+                    (Format::plain(), Layout::V1, None)
+                } else {
+                    let (f, k) = match &cfg.password {
+                        Some(pw) => Format::encrypted(pw.as_bytes(), cfg.kdf).map(|(f, k)| (f, Some(k)))?,
+                        None => (Format::plain(), None),
+                    };
+                    write_atomic(&root.join("FORMAT"), &f.encode())?;
+                    (f, Layout::V2, k)
+                }
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if keys.is_none() {
+            keys = match (&format.keys, &cfg.password) {
+                (Some(_), Some(pw)) => Some(format.unlock(pw.as_bytes())?),
+                (Some(_), None) => return Err(Error::PasswordRequired),
+                (None, Some(_)) => return Err(Error::NotEncrypted),
+                (None, None) => None,
+            };
+        }
+
+        let (index, clean) = Index::open(&root.join("index.bin"))?;
         let mut s = Store {
             root,
             cfg,
             _lock: lock,
+            layout,
+            format,
+            keys,
             index,
             active: None,
             next_segment: ids.last().map_or(1, |i| i + 1),
@@ -195,7 +246,7 @@ impl Store {
 
         for (n, &id) in ids.iter().enumerate() {
             let p = segment::path(&dir, id);
-            let scan = segment::scan(&p)?;
+            let scan = segment::scan_layout(&p, self.layout)?;
             if scan.valid_end < scan.file_len {
                 if n + 1 != ids.len() {
                     return Err(Error::CorruptSegment(id));
@@ -260,8 +311,19 @@ impl Store {
         Ok(())
     }
 
+    // hash is the chunk id; for v2 the payload is what pack() makes of the chunk
     fn append(&mut self, hash: &Hash, data: &[u8]) -> Result<Entry> {
-        let rec = segment::record_len(data.len() as u32);
+        match self.layout {
+            Layout::V1 => self.append_raw(hash, 0, data),
+            Layout::V2 => {
+                let (codec, payload) = transform::pack(data, hash, self.cfg.compression, self.keys.as_ref());
+                self.append_raw(hash, codec, &payload)
+            }
+        }
+    }
+
+    fn append_raw(&mut self, hash: &Hash, codec: u8, payload: &[u8]) -> Result<Entry> {
+        let rec = self.layout.record_len(payload.len() as u32);
         let full = self.active.as_ref().is_some_and(|a| a.len > 0 && a.len + rec > self.cfg.segment_size);
         if self.active.is_none() {
             self.open_active(true)?;
@@ -270,8 +332,12 @@ impl Store {
         }
 
         let a = self.active.as_mut().unwrap();
-        a.file.write_all(&segment::encode_record(hash, data))?;
-        let e = Entry { segment: a.id, offset: a.len, len: data.len() as u32, refs: 0 };
+        let bytes = match self.layout {
+            Layout::V1 => segment::encode_record(hash, payload),
+            Layout::V2 => segment::encode_record_v2(hash, codec, payload),
+        };
+        a.file.write_all(&bytes)?;
+        let e = Entry { segment: a.id, offset: a.len, len: payload.len() as u32, refs: 0 };
         a.len += rec;
         Ok(e)
     }
@@ -284,7 +350,7 @@ impl Store {
 
         let chunker = Chunker::new(src, self.cfg.chunker)?;
         let mut refs = Vec::new();
-        let (mut new_chunks, mut new_bytes) = (0u64, 0u64);
+        let (mut new_chunks, mut new_bytes, mut stored_bytes) = (0u64, 0u64, 0u64);
 
         // The rolling hash is the slowest stage and is strictly serial, so it
         // gets its own thread; hashing and disk writes overlap with it.
@@ -302,12 +368,13 @@ impl Store {
 
             for c in rx {
                 let c = c?;
-                let hash = Hash::of(&c.data);
+                let hash = self.chunk_id(&c.data);
                 if self.index.get(&hash).is_none() {
                     let e = self.append(&hash, &c.data)?;
                     self.index.insert(&hash, e)?;
                     new_chunks += 1;
                     new_bytes += c.data.len() as u64;
+                    stored_bytes += e.len as u64;
                 }
                 refs.push(ChunkRef { hash, len: c.data.len() as u32 });
             }
@@ -316,8 +383,15 @@ impl Store {
 
         let m = Manifest::new(refs);
         let id = m.id();
-        let mut report =
-            PutReport { id, size: m.size, chunks: m.chunks.len() as u64, new_chunks, new_bytes, existed: false };
+        let mut report = PutReport {
+            id,
+            size: m.size,
+            chunks: m.chunks.len() as u64,
+            new_chunks,
+            new_bytes,
+            stored_bytes,
+            existed: false,
+        };
 
         let path = self.manifest_path(&id);
         if path.exists() {
@@ -333,7 +407,7 @@ impl Store {
         let tmp = path.with_extension("tmp");
         {
             let mut f = File::create(&tmp)?;
-            f.write_all(&m.encode())?;
+            f.write_all(&self.seal_meta(b"manifest", id.as_bytes(), m.encode()))?;
             f.sync_all()?;
         }
         fs::rename(&tmp, &path)?;
@@ -375,6 +449,7 @@ impl Store {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(Error::NotFound(*id)),
             Err(e) => return Err(e.into()),
         };
+        let buf = self.open_meta(b"manifest", id.as_bytes(), buf).ok_or(Error::CorruptManifest(*id))?;
         let m = Manifest::decode(&buf).map_err(|_| Error::CorruptManifest(*id))?;
         if m.id() != *id {
             return Err(Error::CorruptManifest(*id));
@@ -392,22 +467,74 @@ impl Store {
         Ok(f)
     }
 
-    /// Reads one chunk and re-hashes it; a mismatch is `Error::Corrupt`.
-    pub fn get_chunk(&self, h: &Hash) -> Result<Vec<u8>> {
+    // The record as stored: codec byte and payload, header and checksum verified but not decoded.
+    fn load(&self, h: &Hash) -> Result<(u8, Vec<u8>)> {
         let e = self.index.get(h).ok_or(Error::MissingChunk(*h))?;
         let f = self.reader(e.segment)?;
 
-        let mut buf = vec![0u8; segment::record_len(e.len) as usize];
+        let mut buf = vec![0u8; self.layout.record_len(e.len) as usize];
         segment::read_exact_at(&f, &mut buf, e.offset).map_err(|err| match err.kind() {
             io::ErrorKind::UnexpectedEof => Error::Corrupt(*h),
             _ => Error::Io(err),
         })?;
 
-        let payload = buf.split_off(segment::REC_HEADER as usize);
-        if buf[..32] != h.as_bytes()[..] || Hash::of(&payload) != *h {
+        let (codec, _) = segment::open_record(self.layout, &buf, h).ok_or(Error::Corrupt(*h))?;
+        let start = self.layout.header() as usize;
+        buf.truncate(start + e.len as usize);
+        buf.drain(..start);
+        Ok((codec, buf))
+    }
+
+    fn decode(&self, h: &Hash, codec: u8, payload: Vec<u8>) -> Result<Vec<u8>> {
+        let data = if codec == 0 && self.keys.is_none() {
+            payload
+        } else {
+            transform::unpack(codec, &payload, h, self.keys.as_ref()).ok_or(Error::Corrupt(*h))?
+        };
+        if self.chunk_id(&data) != *h {
             return Err(Error::Corrupt(*h));
         }
-        Ok(payload)
+        Ok(data)
+    }
+
+    /// Reads one chunk, undoes compression and encryption, and re-hashes it; a mismatch is `Error::Corrupt`.
+    pub fn get_chunk(&self, h: &Hash) -> Result<Vec<u8>> {
+        let (codec, payload) = self.load(h)?;
+        self.decode(h, codec, payload)
+    }
+
+    // ids are keyed hashes in an encrypted store, so nobody without the key can confirm a file is in it
+    fn chunk_id(&self, data: &[u8]) -> Hash {
+        match &self.keys {
+            Some(k) => k.chunk_id(data),
+            None => Hash::of(data),
+        }
+    }
+
+    pub(crate) fn seal_meta(&self, ctx: &[u8], name: &[u8], data: Vec<u8>) -> Vec<u8> {
+        match &self.keys {
+            Some(k) => k.seal(&[ctx, name].concat(), &data),
+            None => data,
+        }
+    }
+
+    pub(crate) fn open_meta(&self, ctx: &[u8], name: &[u8], data: Vec<u8>) -> Option<Vec<u8>> {
+        match &self.keys {
+            Some(k) => k.open(&[ctx, name].concat(), &data),
+            None => Some(data),
+        }
+    }
+
+    pub fn is_encrypted(&self) -> bool {
+        self.keys.is_some()
+    }
+
+    /// Rewraps the master key under a new password; no chunk is rewritten.
+    pub fn change_password(&mut self, new: &Password) -> Result<()> {
+        let keys = self.keys.as_ref().ok_or(Error::NotEncrypted)?;
+        self.format.rewrap(keys, new.as_bytes(), self.cfg.kdf)?;
+        write_atomic(&self.root.join("FORMAT"), &self.format.encode())?;
+        Ok(())
     }
 
     /// Writes the whole object to `out`, verifying every chunk on the way.
@@ -536,7 +663,7 @@ impl Store {
         let mut tally: BTreeMap<u32, Tally> = BTreeMap::new();
         for (_, e) in &entries {
             let t = tally.entry(e.segment).or_default();
-            let n = segment::record_len(e.len);
+            let n = self.layout.record_len(e.len);
             if e.refs == 0 { t.dead += n } else { t.live += n }
         }
 
@@ -581,10 +708,12 @@ impl Store {
         self.open_active(false)?;
         let mut moved = 0u64;
         for (h, old) in live {
-            let data = self.get_chunk(&h)?;
-            let ne = self.append(&h, &data)?;
+            // decode first so a rotten chunk stops the gc before its only copy is deleted
+            let (codec, payload) = self.load(&h)?;
+            self.decode(&h, codec, payload.clone())?;
+            let ne = self.append_raw(&h, codec, &payload)?;
             self.index.insert(&h, Entry { refs: old.refs, ..ne })?;
-            moved += segment::record_len(old.len);
+            moved += self.layout.record_len(old.len);
             rep.chunks_moved += 1;
         }
         if let Some(a) = &self.active {

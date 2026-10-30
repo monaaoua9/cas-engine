@@ -9,6 +9,34 @@ use crate::hash::Hash;
 const NONCE: usize = 24;
 const TAG: usize = 16;
 
+/// A password as bytes. Debug never prints it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Password(Vec<u8>);
+
+impl Password {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<&str> for Password {
+    fn from(s: &str) -> Self {
+        Password(s.as_bytes().to_vec())
+    }
+}
+
+impl From<Vec<u8>> for Password {
+    fn from(v: Vec<u8>) -> Self {
+        Password(v)
+    }
+}
+
+impl fmt::Debug for Password {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Password(..)")
+    }
+}
+
 /// Argon2id cost. The defaults take a few hundred ms and 64 MiB; tests turn them down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Kdf {

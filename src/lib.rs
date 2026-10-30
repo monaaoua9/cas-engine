@@ -21,11 +21,12 @@ pub mod transform;
 pub mod tree;
 
 pub use chunker::{Algorithm, Chunker, ChunkerConfig};
+pub use crypto::{Kdf, Password};
 pub use error::{Error, Result};
 pub use hash::Hash;
 pub use manifest::{ChunkRef, Manifest};
 pub use merkle::{MerkleTree, Proof};
 pub use snapshot::{Retention, Snapshot};
 pub use store::{ObjectReader, Store, StoreConfig};
-pub use tree::{Entry, Kind, Tree};
 pub use transform::Compression;
+pub use tree::{Entry, Kind, Tree};

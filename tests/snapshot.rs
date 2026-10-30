@@ -9,6 +9,7 @@ fn cfg() -> StoreConfig {
         chunker: ChunkerConfig { min_size: 1 << 10, avg_size: 4 << 10, max_size: 16 << 10, ..ChunkerConfig::default() },
         segment_size: 64 << 10,
         gc_threshold: 0.3,
+        ..StoreConfig::default()
     }
 }
 

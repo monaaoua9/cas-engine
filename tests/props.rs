@@ -16,7 +16,7 @@ fn chunks_for(gear: bool) -> ChunkerConfig {
 }
 
 fn store_cfg() -> StoreConfig {
-    StoreConfig { chunker: small_chunks(), segment_size: 16 << 10, gc_threshold: 0.0 }
+    StoreConfig { chunker: small_chunks(), segment_size: 16 << 10, gc_threshold: 0.0, ..StoreConfig::default() }
 }
 
 fn noise(len: usize, seed: u64) -> Vec<u8> {
