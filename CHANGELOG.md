@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-10-31
+
 - TLS for the cas protocol (`serve --tls-cert/--tls-key`, `push/pull --tls-ca`, `cas tls-cert` to make a self-signed certificate)
 - tar import keeps hard links as extra entries for the same object
 
