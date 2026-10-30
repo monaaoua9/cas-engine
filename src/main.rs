@@ -3,7 +3,7 @@ use std::io::BufWriter;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use cas::{Algorithm, Hash, Result, Store, StoreConfig};
+use cas::{Algorithm, Hash, Result, Retention, Store, StoreConfig};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -50,6 +50,56 @@ enum Cmd {
     /// compact segments and drop unreferenced chunks
     Gc,
     Stats,
+    /// directory snapshots: create, list, show, restore, diff, forget, prune
+    #[command(subcommand)]
+    Snapshot(Snap),
+}
+
+#[derive(Subcommand)]
+enum Snap {
+    /// store a directory tree
+    Create {
+        dir: PathBuf,
+        /// default is snap-<unix time>
+        #[arg(short, long)]
+        name: Option<String>,
+    },
+    Ls,
+    /// list the paths inside a snapshot
+    Show {
+        name: String,
+    },
+    /// rebuild a snapshot into an empty (or new) directory
+    Restore {
+        name: String,
+        dest: PathBuf,
+    },
+    /// what changed between two snapshots
+    Diff {
+        a: String,
+        b: String,
+    },
+    /// re-hash everything a snapshot reaches
+    Verify {
+        name: String,
+    },
+    /// drop a snapshot and the objects only it needed (run gc afterwards)
+    Forget {
+        name: String,
+    },
+    /// forget snapshots that fall outside the kept ones
+    Prune {
+        #[arg(long, default_value_t = 0)]
+        keep_last: usize,
+        #[arg(long, default_value_t = 0)]
+        keep_daily: usize,
+        #[arg(long, default_value_t = 0)]
+        keep_weekly: usize,
+        #[arg(long, default_value_t = 0)]
+        keep_monthly: usize,
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn human(n: u64) -> String {
@@ -148,6 +198,73 @@ fn run(cli: Cli) -> Result<bool> {
             println!("dead chunks    {} ({})", s.dead_chunks, human(s.dead_bytes));
             println!("segments       {}", s.segments);
             println!("dedup ratio    {:.2}x", s.dedup_ratio());
+            println!("snapshots      {}", store.snapshot_list()?.len());
+        }
+        Cmd::Snapshot(c) => return snapshot(&mut store, c),
+    }
+    Ok(true)
+}
+
+fn snapshot(store: &mut Store, cmd: Snap) -> Result<bool> {
+    match cmd {
+        Snap::Create { dir, name } => {
+            let r = store.snapshot_dir(dir, name.as_deref())?;
+            println!("{}", r.name);
+            eprintln!(
+                "{} files, {} dirs, {} symlinks, {} ({} new), tree {}",
+                r.files,
+                r.dirs,
+                r.symlinks,
+                human(r.bytes),
+                human(r.new_bytes),
+                r.root.short()
+            );
+            for p in &r.skipped {
+                eprintln!("skipped {}", p.display());
+            }
+        }
+        Snap::Ls => {
+            for s in store.snapshot_list()? {
+                println!("{:<24} {}  {}  {}", s.name, s.time, s.root.short(), s.source);
+            }
+        }
+        Snap::Show { name } => {
+            let s = store.snapshot_get(&name)?;
+            for (path, e) in store.flatten(&s.root)? {
+                match e.kind {
+                    cas::Kind::Dir => println!("d {:>10}  {path}/", ""),
+                    cas::Kind::File => println!("- {:>10}  {path}", human(e.size)),
+                    cas::Kind::Symlink => println!("l {:>10}  {path} -> {}", "", e.target),
+                }
+            }
+        }
+        Snap::Restore { name, dest } => {
+            let r = store.snapshot_restore(&name, dest)?;
+            eprintln!("{} files, {} dirs, {} symlinks, {}", r.files, r.dirs, r.symlinks, human(r.bytes));
+            if r.skipped > 0 {
+                eprintln!("{} symlinks skipped (not supported here)", r.skipped);
+            }
+        }
+        Snap::Diff { a, b } => {
+            let ch = store.snapshot_diff(&a, &b)?;
+            for c in &ch {
+                println!("{} {}", c.sigil(), c.path);
+            }
+            return Ok(ch.is_empty());
+        }
+        Snap::Verify { name } => {
+            store.snapshot_verify(&name)?;
+            println!("ok");
+        }
+        Snap::Forget { name } => {
+            let r = store.snapshot_forget(&name)?;
+            eprintln!("released {} objects, {} still needed", r.objects_removed, r.objects_kept);
+        }
+        Snap::Prune { keep_last, keep_daily, keep_weekly, keep_monthly, dry_run } => {
+            let p = Retention { last: keep_last, daily: keep_daily, weekly: keep_weekly, monthly: keep_monthly };
+            for n in store.snapshot_prune(&p, dry_run)? {
+                println!("{}{n}", if dry_run { "would forget " } else { "forgot " });
+            }
         }
     }
     Ok(true)
