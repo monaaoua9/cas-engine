@@ -6,6 +6,7 @@
 
 pub mod backup;
 pub mod chunker;
+mod cursor;
 pub mod error;
 pub mod hash;
 pub mod index;
@@ -14,11 +15,7 @@ pub mod merkle;
 pub mod segment;
 pub mod snapshot;
 pub mod store;
-mod
-cursor;
-pub
-mod
-tree;
+pub mod tree;
 
 pub use chunker::{Algorithm, Chunker, ChunkerConfig};
 pub use error::{Error, Result};
