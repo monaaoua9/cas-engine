@@ -235,7 +235,14 @@ impl Store {
         Ok((name, time, acc))
     }
 
-    pub(crate) fn finish_snapshot(&self, name: String, time: i64, root: Hash, source: String, acc: Acc) -> Result<SnapshotReport> {
+    pub(crate) fn finish_snapshot(
+        &self,
+        name: String,
+        time: i64,
+        root: Hash,
+        source: String,
+        acc: Acc,
+    ) -> Result<SnapshotReport> {
         let snap = Snapshot {
             name: name.clone(),
             time,
