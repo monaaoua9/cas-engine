@@ -152,6 +152,45 @@ impl Store {
         Ok(s)
     }
 
+    /// The snapshot record file exactly as stored.
+    pub fn snapshot_bytes(&self, name: &str) -> Result<Vec<u8>> {
+        self.snapshot_get(name)?;
+        Ok(fs::read(self.snap_path(name))?)
+    }
+
+    pub fn snapshot_members(&self, name: &str) -> Result<Vec<Hash>> {
+        Ok(self.snapshot_get(name)?.members.iter().map(|m| m.id).collect())
+    }
+
+    /// Installs a record received from elsewhere. Every object it lists has to be here already.
+    /// False if an identical snapshot is already present; a different one under the same name is an error.
+    pub fn put_snapshot_bytes(&mut self, name: &str, raw: Vec<u8>) -> Result<bool> {
+        if !valid_snapshot_name(name) {
+            return Err(Error::InvalidName(name.to_string()));
+        }
+        let bad = || Error::CorruptSnapshot(name.to_string());
+        let plain = self.open_meta(b"snapshot", name.as_bytes(), raw.clone()).ok_or_else(bad)?;
+        let snap = Snapshot::decode(&plain).map_err(|_| bad())?;
+        if snap.name != name {
+            return Err(bad());
+        }
+        if self.snap_path(name).exists() {
+            return if self.snapshot_get(name)? == snap {
+                Ok(false)
+            } else {
+                Err(Error::SnapshotExists(name.to_string()))
+            };
+        }
+        if let Some(m) =
+            std::iter::once(&snap.root).chain(snap.members.iter().map(|m| &m.id)).find(|id| !self.contains(id))
+        {
+            return Err(Error::NotFound(*m));
+        }
+        fs::create_dir_all(self.snap_dir())?;
+        write_atomic(&self.snap_path(name), &raw)?;
+        Ok(true)
+    }
+
     /// All snapshots, oldest first.
     pub fn snapshot_list(&self) -> Result<Vec<Snapshot>> {
         let mut out = Vec::new();

@@ -21,6 +21,7 @@ pub mod repair;
 pub mod segment;
 pub mod snapshot;
 pub mod store;
+pub mod sync;
 pub mod transform;
 pub mod tree;
 pub mod units;
