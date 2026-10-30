@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::hash::Hash;
 use crate::metrics;
 use crate::store::Store;
+use crate::tls::{Conn, TlsServer};
 use crate::wire::*;
 
 pub struct ServeOptions {
@@ -18,11 +19,13 @@ pub struct ServeOptions {
     pub max_conns: usize,
     /// A connection that sends nothing for this long is dropped.
     pub idle: Duration,
+    /// Wrap every connection in TLS. The token handshake still runs inside it.
+    pub tls: Option<TlsServer>,
 }
 
 impl Default for ServeOptions {
     fn default() -> Self {
-        ServeOptions { token: None, read_only: false, max_conns: 64, idle: Duration::from_secs(60) }
+        ServeOptions { token: None, read_only: false, max_conns: 64, idle: Duration::from_secs(60), tls: None }
     }
 }
 
@@ -134,7 +137,7 @@ impl Server {
     }
 }
 
-fn handshake(s: &mut TcpStream, sh: &Shared) -> Result<()> {
+fn handshake(s: &mut Conn, sh: &Shared) -> Result<()> {
     let nonce: [u8; 32] = random();
     let mut hello = Vec::with_capacity(4 + 1 + 1 + 32);
     hello.extend_from_slice(MAGIC);
@@ -162,10 +165,14 @@ fn handshake(s: &mut TcpStream, sh: &Shared) -> Result<()> {
     Ok(())
 }
 
-fn serve_conn(mut s: TcpStream, sh: &Shared, stop: &AtomicBool) -> Result<()> {
-    s.set_nonblocking(false)?;
+fn serve_conn(sock: TcpStream, sh: &Shared, stop: &AtomicBool) -> Result<()> {
+    sock.set_nonblocking(false)?;
+    sock.set_nodelay(true)?;
+    let mut s = match &sh.opts.tls {
+        Some(t) => t.accept(sock)?,
+        None => Conn::Plain(sock),
+    };
     s.set_write_timeout(Some(sh.opts.idle))?;
-    s.set_nodelay(true)?;
     // the handshake is not allowed to dawdle either
     s.set_read_timeout(Some(sh.opts.idle))?;
     handshake(&mut s, sh)?;

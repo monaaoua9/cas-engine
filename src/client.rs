@@ -5,21 +5,33 @@ use std::time::Duration;
 use crate::error::{Error, Result};
 use crate::hash::Hash;
 use crate::sync::Peer;
+use crate::tls::{Conn, TlsClient};
 use crate::wire::*;
 
 /// One authenticated connection to a `Server`. Requests are strictly one at a time.
 pub struct Client {
-    sock: TcpStream,
+    sock: Conn,
     read_only: bool,
 }
 
 impl Client {
     /// `token` has to match the server's; with none given, only a server running without a token lets you in.
     pub fn connect(addr: impl ToSocketAddrs, token: Option<&[u8]>) -> Result<Client> {
-        let mut sock = TcpStream::connect(addr)?;
+        let sock = TcpStream::connect(addr)?;
+        sock.set_nodelay(true)?;
+        Self::open(Conn::Plain(sock), token)
+    }
+
+    /// `host` must match a name or address in the server certificate.
+    pub fn connect_tls(host: &str, port: u16, token: Option<&[u8]>, tls: &TlsClient) -> Result<Client> {
+        let sock = TcpStream::connect((host, port))?;
+        sock.set_nodelay(true)?;
+        Self::open(tls.connect(host, sock)?, token)
+    }
+
+    fn open(mut sock: Conn, token: Option<&[u8]>) -> Result<Client> {
         sock.set_read_timeout(Some(Duration::from_secs(60)))?;
         sock.set_write_timeout(Some(Duration::from_secs(60)))?;
-        sock.set_nodelay(true)?;
 
         let mut hello = [0u8; 4 + 1 + 1 + 32];
         sock.read_exact(&mut hello)?;

@@ -28,6 +28,7 @@ pub mod store;
 pub mod sync;
 pub mod tar;
 pub mod timefmt;
+pub mod tls;
 pub mod transform;
 pub mod tree;
 pub mod units;

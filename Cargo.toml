@@ -18,6 +18,9 @@ ctrlc = "3.5.2"
 getrandom = "0.4"
 lz4_flex = "0.14.0"
 memmap2 = "0.9.12"
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { version = "1.15.1", features = ["std"] }
 thiserror = "2.0.21"
 
 [dev-dependencies]

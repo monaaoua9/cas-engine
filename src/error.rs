@@ -71,6 +71,9 @@ pub enum Error {
     #[error("bad tar archive: {0}")]
     BadTar(&'static str),
 
+    #[error("tls: {0}")]
+    Tls(String),
+
     #[error("protocol error: {0}")]
     Protocol(&'static str),
 
