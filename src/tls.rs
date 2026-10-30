@@ -1,7 +1,7 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rustls::pki_types::pem::PemObject;
@@ -129,6 +129,38 @@ impl Write for Conn {
             Conn::Server(s) => s.flush(),
             Conn::Client(s) => s.flush(),
         }
+    }
+}
+
+/// One connection used for reading and writing from two places (a `BufReader` and the response
+/// writer). TLS keeps both directions in one object, so unlike a socket it can't be cloned; the
+/// lock is never contended because a request is read completely before its response is written.
+#[derive(Clone)]
+pub(crate) struct SharedConn(Arc<Mutex<Conn>>);
+
+impl SharedConn {
+    pub fn new(c: Conn) -> SharedConn {
+        SharedConn(Arc::new(Mutex::new(c)))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Conn> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Read for SharedConn {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.lock().read(buf)
+    }
+}
+
+impl Write for SharedConn {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.lock().write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.lock().flush()
     }
 }
 

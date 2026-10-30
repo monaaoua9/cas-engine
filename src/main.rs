@@ -135,6 +135,9 @@ enum Cmd {
         tls_cert: Option<PathBuf>,
         #[arg(long, requires = "tls_cert")]
         tls_key: Option<PathBuf>,
+        /// serve WebDAV and /metrics over HTTPS with the same certificate
+        #[arg(long, requires = "tls_cert")]
+        http_tls: bool,
     },
     /// write a self-signed certificate and key for `serve --tls-cert`; the certificate is also the `--tls-ca` file
     TlsCert {
@@ -565,14 +568,25 @@ fn run(cli: Cli) -> Result<bool> {
             }
             out.emit(j, &r.name, &note);
         }
-        Cmd::Serve { listen, dav_listen, metrics_listen, token_file, read_only, max_conns, tls_cert, tls_key } => {
+        Cmd::Serve {
+            listen,
+            dav_listen,
+            metrics_listen,
+            token_file,
+            read_only,
+            max_conns,
+            tls_cert,
+            tls_key,
+            http_tls,
+        } => {
             let token = read_token(&token_file)?;
             let tls = match (tls_cert, tls_key) {
                 (Some(c), Some(k)) => Some(TlsServer::load(&c, &k)?),
                 _ => None,
             };
+            let http_tls = if http_tls { tls.clone() } else { None };
             let opts = ServeOptions { token: token.clone(), read_only, max_conns, tls, ..ServeOptions::default() };
-            return serve(store, listen, dav_listen, metrics_listen, token, opts, &out);
+            return serve(store, listen, dav_listen, metrics_listen, token, opts, http_tls, &out);
         }
         Cmd::Push { addr, snapshot, token_file, tls_ca } => {
             let token = read_token(&token_file)?;
@@ -662,6 +676,7 @@ fn serve(
     metrics: Option<SocketAddr>,
     token: Option<Vec<u8>>,
     opts: ServeOptions,
+    http_tls: Option<TlsServer>,
     out: &Out,
 ) -> Result<bool> {
     let server = Server::bind(store, listen, opts)?;
@@ -671,14 +686,20 @@ fn serve(
 
     let mut addrs = vec![("cas", "cas protocol", server.local_addr()?)];
     if let Some(a) = dav {
-        let h = HttpServer::bind(a, Arc::new(Dav::new(shared.clone(), token)))?
+        let mut h = HttpServer::bind(a, Arc::new(Dav::new(shared.clone(), token)))?
             .with_stop_flag(stop.clone())
             .with_idle(Duration::from_secs(60));
+        if let Some(t) = &http_tls {
+            h = h.with_tls(t.clone());
+        }
         addrs.push(("dav", "webdav", h.local_addr()?));
         threads.push(std::thread::spawn(move || h.run()));
     }
     if let Some(a) = metrics {
-        let h = HttpServer::bind(a, Arc::new(MetricsPage(shared.clone())))?.with_stop_flag(stop.clone());
+        let mut h = HttpServer::bind(a, Arc::new(MetricsPage(shared.clone())))?.with_stop_flag(stop.clone());
+        if let Some(t) = &http_tls {
+            h = h.with_tls(t.clone());
+        }
         addrs.push(("metrics", "metrics", h.local_addr()?));
         threads.push(std::thread::spawn(move || h.run()));
     }

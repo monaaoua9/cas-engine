@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::Duration;
 
+use crate::tls::{Conn, SharedConn, TlsServer};
+
 const MAX_LINE: usize = 8 << 10;
 const MAX_HEADERS: usize = 64 << 10;
 const MAX_BODY: usize = 1 << 20;
@@ -268,12 +270,23 @@ pub fn parse_request(r: &mut impl BufRead) -> io::Result<std::result::Result<Opt
     })
 }
 
-fn serve_conn(sock: TcpStream, h: &dyn Handler, stop: &AtomicBool, idle: Duration) -> io::Result<()> {
+fn serve_conn(
+    sock: TcpStream,
+    tls: Option<&TlsServer>,
+    h: &dyn Handler,
+    stop: &AtomicBool,
+    idle: Duration,
+) -> io::Result<()> {
     sock.set_nonblocking(false)?;
     sock.set_read_timeout(Some(idle))?;
     sock.set_write_timeout(Some(idle))?;
-    let mut out = sock.try_clone()?;
-    let mut r = BufReader::new(sock);
+    let conn = match tls {
+        Some(t) => t.accept(sock).map_err(io::Error::other)?,
+        None => Conn::Plain(sock),
+    };
+    let shared = SharedConn::new(conn);
+    let mut out = shared.clone();
+    let mut r = BufReader::new(shared);
 
     while !stop.load(Relaxed) {
         match read_request(&mut r)? {
@@ -305,13 +318,20 @@ pub struct HttpServer {
     handler: Arc<dyn Handler>,
     stop: Arc<AtomicBool>,
     idle: Duration,
+    tls: Option<TlsServer>,
 }
 
 impl HttpServer {
     pub fn bind(addr: impl ToSocketAddrs, handler: Arc<dyn Handler>) -> io::Result<HttpServer> {
         let listener = TcpListener::bind(addr)?;
         listener.set_nonblocking(true)?;
-        Ok(HttpServer { listener, handler, stop: Arc::new(AtomicBool::new(false)), idle: Duration::from_secs(30) })
+        Ok(HttpServer {
+            listener,
+            handler,
+            stop: Arc::new(AtomicBool::new(false)),
+            idle: Duration::from_secs(30),
+            tls: None,
+        })
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -328,6 +348,12 @@ impl HttpServer {
         self
     }
 
+    /// Serve HTTPS instead of HTTP.
+    pub fn with_tls(mut self, tls: TlsServer) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
     pub fn with_idle(mut self, idle: Duration) -> Self {
         self.idle = idle;
         self
@@ -338,9 +364,9 @@ impl HttpServer {
         while !self.stop.load(Relaxed) {
             match self.listener.accept() {
                 Ok((sock, _)) => {
-                    let (h, stop, idle) = (self.handler.clone(), self.stop.clone(), self.idle);
+                    let (h, stop, idle, tls) = (self.handler.clone(), self.stop.clone(), self.idle, self.tls.clone());
                     conns.push(std::thread::spawn(move || {
-                        let _ = serve_conn(sock, &*h, &stop, idle);
+                        let _ = serve_conn(sock, tls.as_ref(), &*h, &stop, idle);
                     }));
                     conns.retain(|c| !c.is_finished());
                 }
