@@ -143,7 +143,9 @@ impl Store {
             }
             Err(e) => return Err(e.into()),
         };
-        let s = Snapshot::decode(&buf).map_err(|_| Error::CorruptSnapshot(name.to_string()))?;
+        let bad = || Error::CorruptSnapshot(name.to_string());
+        let buf = self.open_meta(b"snapshot", name.as_bytes(), buf).ok_or_else(bad)?;
+        let s = Snapshot::decode(&buf).map_err(|_| bad())?;
         if s.name != name {
             return Err(Error::CorruptSnapshot(name.to_string()));
         }
@@ -196,7 +198,8 @@ impl Store {
         };
         // objects are all durable by now; the record is what makes them a snapshot
         fs::create_dir_all(self.snap_dir())?;
-        write_atomic(&self.snap_path(&name), &snap.encode())?;
+        let sealed = self.seal_meta(b"snapshot", name.as_bytes(), snap.encode());
+        write_atomic(&self.snap_path(&name), &sealed)?;
 
         Ok(SnapshotReport {
             name,
