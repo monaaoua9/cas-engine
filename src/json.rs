@@ -23,6 +23,11 @@ impl From<u64> for Json {
         Json::Uint(v)
     }
 }
+impl From<u32> for Json {
+    fn from(v: u32) -> Self {
+        Json::Uint(v as u64)
+    }
+}
 impl From<usize> for Json {
     fn from(v: usize) -> Self {
         Json::Uint(v as u64)
