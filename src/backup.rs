@@ -68,20 +68,20 @@ impl Change {
 }
 
 #[derive(Default)]
-struct Acc {
+pub(crate) struct Acc {
     // id -> created
     members: BTreeMap<Hash, bool>,
     inherited: HashSet<Hash>,
-    files: u64,
-    dirs: u64,
-    links: u64,
-    bytes: u64,
-    new_bytes: u64,
-    skipped: Vec<PathBuf>,
+    pub(crate) files: u64,
+    pub(crate) dirs: u64,
+    pub(crate) links: u64,
+    pub(crate) bytes: u64,
+    pub(crate) new_bytes: u64,
+    pub(crate) skipped: Vec<PathBuf>,
 }
 
 impl Acc {
-    fn note(&mut self, id: Hash, existed: bool) {
+    pub(crate) fn note(&mut self, id: Hash, existed: bool) {
         let created = !existed || self.inherited.contains(&id);
         *self.members.entry(id).or_default() |= created;
     }
@@ -212,6 +212,14 @@ impl Store {
     /// Stores a directory tree and records it under `name` (default `snap-<unix time>`).
     pub fn snapshot_dir(&mut self, dir: impl AsRef<Path>, name: Option<&str>) -> Result<SnapshotReport> {
         let dir = dir.as_ref();
+        let (name, time, mut acc) = self.begin_snapshot(name)?;
+        let root = self.snap_walk(dir, 0, &mut acc)?;
+        let source = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()).display().to_string();
+        self.finish_snapshot(name, time, root, source, acc)
+    }
+
+    // picks the name and seeds the accumulator with what earlier snapshots created
+    pub(crate) fn begin_snapshot(&self, name: Option<&str>) -> Result<(String, i64, Acc)> {
         let time = now();
         let name = name.map_or_else(|| format!("snap-{time}"), str::to_owned);
         if !valid_snapshot_name(&name) {
@@ -220,19 +228,19 @@ impl Store {
         if self.snap_path(&name).exists() {
             return Err(Error::SnapshotExists(name));
         }
-
         let mut acc = Acc::default();
         for s in self.snapshot_list()? {
             acc.inherited.extend(s.members.iter().filter(|m| m.created).map(|m| m.id));
         }
+        Ok((name, time, acc))
+    }
 
-        let root = self.snap_walk(dir, 0, &mut acc)?;
-
+    pub(crate) fn finish_snapshot(&self, name: String, time: i64, root: Hash, source: String, acc: Acc) -> Result<SnapshotReport> {
         let snap = Snapshot {
             name: name.clone(),
             time,
             root,
-            source: fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()).display().to_string(),
+            source,
             members: acc.members.iter().map(|(&id, &created)| Member { id, created }).collect(),
         };
         // objects are all durable by now; the record is what makes them a snapshot
@@ -250,6 +258,14 @@ impl Store {
             new_bytes: acc.new_bytes,
             skipped: acc.skipped,
         })
+    }
+
+    pub(crate) fn put_tree(&mut self, entries: Vec<Entry>, acc: &mut Acc) -> Result<Hash> {
+        let t = Tree::new(entries)?;
+        let r = self.put_bytes(&t.encode())?;
+        acc.note(r.id, r.existed);
+        acc.new_bytes += r.new_bytes;
+        Ok(r.id)
     }
 
     fn snap_walk(&mut self, dir: &Path, depth: usize, acc: &mut Acc) -> Result<Hash> {
@@ -307,11 +323,7 @@ impl Store {
             entries.push(e);
         }
 
-        let t = Tree::new(entries)?;
-        let r = self.put_bytes(&t.encode())?;
-        acc.note(r.id, r.existed);
-        acc.new_bytes += r.new_bytes;
-        Ok(r.id)
+        self.put_tree(entries, acc)
     }
 
     pub fn load_tree(&self, id: &Hash) -> Result<Tree> {
