@@ -16,6 +16,7 @@ pub mod json;
 pub mod manifest;
 pub mod merkle;
 pub mod metrics;
+pub mod repair;
 pub mod segment;
 pub mod snapshot;
 pub mod store;
