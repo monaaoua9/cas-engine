@@ -3,7 +3,7 @@ use std::io::BufWriter;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use cas::{Algorithm, Hash, Result, Retention, Store, StoreConfig};
+use cas::{Algorithm, Compression, Hash, Password, Result, Retention, Store, StoreConfig};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -16,6 +16,14 @@ struct Cli {
     /// boundary algorithm for new data; gear is several times faster, rabin is the default
     #[arg(long, value_parser = ["rabin", "gear"], default_value = "rabin")]
     chunker: String,
+
+    /// compress new chunks; chunks that don't shrink are stored as they are
+    #[arg(long, value_parser = ["none", "lz4"], default_value = "none")]
+    compress: String,
+
+    /// file holding the store password (first line, or CAS_PASSWORD_FILE). On a new store this turns encryption on.
+    #[arg(long)]
+    password_file: Option<PathBuf>,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -50,6 +58,11 @@ enum Cmd {
     /// compact segments and drop unreferenced chunks
     Gc,
     Stats,
+    /// set a new password on an encrypted store; no data is rewritten
+    Passwd {
+        #[arg(long)]
+        new_password_file: PathBuf,
+    },
     /// directory snapshots: create, list, show, restore, diff, forget, prune
     #[command(subcommand)]
     Snapshot(Snap),
@@ -113,10 +126,29 @@ fn human(n: u64) -> String {
     if i == 0 { format!("{n} B") } else { format!("{v:.1} {}", U[i]) }
 }
 
+fn read_password(p: &std::path::Path) -> std::io::Result<Password> {
+    let mut b = std::fs::read(p)?;
+    // editors add a newline; the password is the first line
+    if let Some(i) = b.iter().position(|&c| c == b'\n') {
+        b.truncate(i);
+    }
+    if b.last() == Some(&b'\r') {
+        b.pop();
+    }
+    Ok(Password::from(b))
+}
+
 fn run(cli: Cli) -> Result<bool> {
     let mut cfg = StoreConfig::default();
     if cli.chunker == "gear" {
         cfg.chunker.algorithm = Algorithm::Gear;
+    }
+    if cli.compress == "lz4" {
+        cfg.compression = Compression::Lz4;
+    }
+    let pw_file = cli.password_file.clone().or_else(|| std::env::var_os("CAS_PASSWORD_FILE").map(PathBuf::from));
+    if let Some(p) = pw_file {
+        cfg.password = Some(read_password(&p)?);
     }
     let mut store = Store::open(&cli.store, cfg)?;
 
@@ -125,11 +157,12 @@ fn run(cli: Cli) -> Result<bool> {
             let r = store.put_file(path)?;
             println!("{}", r.id);
             eprintln!(
-                "{} in {} chunks, {} new ({}){}",
+                "{} in {} chunks, {} new ({}, {} stored){}",
                 human(r.size),
                 r.chunks,
                 r.new_chunks,
                 human(r.new_bytes),
+                human(r.stored_bytes),
                 if r.existed { ", already stored" } else { "" }
             );
         }
@@ -199,6 +232,10 @@ fn run(cli: Cli) -> Result<bool> {
             println!("segments       {}", s.segments);
             println!("dedup ratio    {:.2}x", s.dedup_ratio());
             println!("snapshots      {}", store.snapshot_list()?.len());
+            println!("encrypted      {}", if store.is_encrypted() { "yes" } else { "no" });
+        }
+        Cmd::Passwd { new_password_file } => {
+            store.change_password(&read_password(&new_password_file)?)?;
         }
         Cmd::Snapshot(c) => return snapshot(&mut store, c),
     }
