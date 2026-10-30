@@ -269,7 +269,7 @@ mod tests {
             let s = scan_bytes(Layout::V2, &bad);
             if i >= second {
                 // everything before the damaged record survives
-                assert!(s.records.len() >= 1, "byte {i}");
+                assert!(!s.records.is_empty(), "byte {i}");
             }
             assert!(s.records.len() < 4, "byte {i} went unnoticed");
         }
