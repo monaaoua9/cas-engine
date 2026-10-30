@@ -34,6 +34,27 @@ pub enum Error {
 
     #[error("chunk index out of range")]
     OutOfRange,
+
+    #[error("malformed tree: {0}")]
+    BadTree(&'static str),
+
+    #[error("malformed snapshot record: {0}")]
+    BadSnapshot(&'static str),
+
+    #[error("invalid name: {0:?}")]
+    InvalidName(String),
+
+    #[error("snapshot {0} not found")]
+    SnapshotNotFound(String),
+
+    #[error("snapshot {0} already exists")]
+    SnapshotExists(String),
+
+    #[error("snapshot {0} failed its integrity check")]
+    CorruptSnapshot(String),
+
+    #[error("destination {0} is not empty")]
+    DestNotEmpty(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
