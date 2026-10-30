@@ -19,6 +19,7 @@ pub mod merkle;
 pub mod metrics;
 pub mod repair;
 pub mod segment;
+pub mod server;
 pub mod snapshot;
 pub mod store;
 pub mod sync;
