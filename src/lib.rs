@@ -10,6 +10,7 @@ pub mod chunker;
 pub mod client;
 pub mod crypto;
 mod cursor;
+pub mod dav;
 pub mod error;
 pub mod format;
 pub mod hash;
