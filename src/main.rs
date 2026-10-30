@@ -586,7 +586,8 @@ fn run(cli: Cli) -> Result<bool> {
             };
             let http_tls = if http_tls { tls.clone() } else { None };
             let opts = ServeOptions { token: token.clone(), read_only, max_conns, tls, ..ServeOptions::default() };
-            return serve(store, listen, dav_listen, metrics_listen, token, opts, http_tls, &out);
+            let http = HttpFront { dav: dav_listen, metrics: metrics_listen, tls: http_tls };
+            return serve(store, listen, http, token, opts, &out);
         }
         Cmd::Push { addr, snapshot, token_file, tls_ca } => {
             let token = read_token(&token_file)?;
@@ -669,16 +670,21 @@ impl Handler for MetricsPage {
     }
 }
 
+struct HttpFront {
+    dav: Option<SocketAddr>,
+    metrics: Option<SocketAddr>,
+    tls: Option<TlsServer>,
+}
+
 fn serve(
     store: Store,
     listen: SocketAddr,
-    dav: Option<SocketAddr>,
-    metrics: Option<SocketAddr>,
+    http: HttpFront,
     token: Option<Vec<u8>>,
     opts: ServeOptions,
-    http_tls: Option<TlsServer>,
     out: &Out,
 ) -> Result<bool> {
+    let HttpFront { dav, metrics, tls: http_tls } = http;
     let server = Server::bind(store, listen, opts)?;
     let stop = server.stop_flag();
     let shared = server.shared();
