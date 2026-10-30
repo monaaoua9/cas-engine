@@ -29,13 +29,25 @@ fn fail(_: &str) {}
 // Windows has no equivalent of fsync on a directory handle; NTFS journals
 // metadata itself.
 #[cfg(unix)]
-fn sync_dir(p: &Path) -> io::Result<()> {
+pub(crate) fn sync_dir(p: &Path) -> io::Result<()> {
     File::open(p)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_dir(_: &Path) -> io::Result<()> {
+pub(crate) fn sync_dir(_: &Path) -> io::Result<()> {
     Ok(())
+}
+
+// tmp + fsync + rename, same dance the manifests use
+pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)?;
+    sync_dir(path.parent().unwrap_or(Path::new(".")))
 }
 
 #[derive(Clone, Debug)]
@@ -134,6 +146,16 @@ impl Store {
             }
         }
 
+        // same for snapshot records
+        if let Ok(rd) = fs::read_dir(root.join("snapshots")) {
+            for e in rd {
+                let p = e?.path();
+                if p.extension().is_some_and(|x| x == "tmp") {
+                    fs::remove_file(p)?;
+                }
+            }
+        }
+
         let (index, clean) = Index::open(&root.join("index.bin"))?;
         let ids = segment::list_ids(&root.join("segments"))?;
         let mut s = Store {
@@ -149,6 +171,10 @@ impl Store {
             s.rebuild()?;
         }
         Ok(s)
+    }
+
+    pub(crate) fn root_dir(&self) -> &Path {
+        &self.root
     }
 
     fn seg_dir(&self) -> PathBuf {
