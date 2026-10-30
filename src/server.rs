@@ -53,6 +53,11 @@ impl Shared {
         self.store.write().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Runs `f` with the store held for reading. Other readers go on in parallel; writers wait.
+    pub fn with_store<R>(&self, f: impl FnOnce(&Store) -> R) -> R {
+        f(&self.read())
+    }
+
     /// Prometheus text for the store plus this server's own counters.
     pub fn metrics_text(&self) -> Result<String> {
         let st = self.read();
