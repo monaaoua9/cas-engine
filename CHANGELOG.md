@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `serve --http-tls`: WebDAV and `/metrics` over HTTPS with the same certificate
+
 ## 0.3.0 - 2026-10-31
 
 - TLS for the cas protocol (`serve --tls-cert/--tls-key`, `push/pull --tls-ca`, `cas tls-cert` to make a self-signed certificate)
