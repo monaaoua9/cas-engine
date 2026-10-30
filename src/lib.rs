@@ -5,6 +5,7 @@
 //! its chunk list. See the README for the on-disk layout.
 
 pub mod backup;
+pub mod bench;
 pub mod chunker;
 pub mod crypto;
 mod cursor;
