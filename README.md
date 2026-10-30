@@ -100,6 +100,12 @@ Objects are deleted by removing the manifest and decrementing one reference per 
 | `units` | `64K` / `10GiB` parsing and `human()` |
 | `bench` | the `cas bench` timings |
 | `backup` | snapshot a directory, restore, diff, verify, forget, prune |
+| `wire` | framing and message layout of the network protocol, token proofs |
+| `sync` | the `Peer` trait and the copy functions behind `push` / `pull` |
+| `server`, `client` | TCP server (thread per connection, one `RwLock` around the store) and its client |
+| `http`, `timefmt` | a small HTTP/1.1 server with hard limits, and date formatting for it |
+| `dav` | read-only WebDAV over snapshots |
+| `tar` | snapshot to tar and back |
 | `main.rs` | `cas` command line |
 
 ## Usage
@@ -122,6 +128,11 @@ cas [-s DIR] snapshot restore <name> <dest>
 cas [-s DIR] snapshot diff <a> <b>
 cas [-s DIR] snapshot forget <name>
 cas [-s DIR] snapshot prune [--keep-last N] [--keep-daily N] [--keep-weekly N] [--keep-monthly N] [--dry-run]
+cas [-s DIR] export <name> [-o FILE]     # tar to stdout unless -o
+cas [-s DIR] import [FILE] [-n NAME]     # tar from stdin unless a file is given
+cas [-s DIR] serve [--listen ADDR] [--dav-listen ADDR] [--metrics-listen ADDR] [--token-file F] [--read-only]
+cas [-s DIR] push ADDR [--snapshot NAME] [--token-file F]
+cas [-s DIR] pull ADDR [--snapshot NAME] [--token-file F]
 ```
 
 As a library:
@@ -206,6 +217,28 @@ Forgetting a snapshot releases only the objects it created. Each member carries 
 
 Not covered: hard links are stored as separate files, owners and extended attributes are not recorded, sockets and devices are skipped (listed in the create output), and symlinks are restored on Unix only.
 
+## Serving and syncing
+
+`cas serve` opens the store and listens on a TCP port (default `127.0.0.1:7878`). `cas push ADDR` and `cas pull ADDR` copy snapshots, or everything, between a local store and a served one. Only what the other side lacks crosses the wire: the sender asks which chunk ids are missing, sends those, then the manifest, then the snapshot record. A second push of the same data sends no chunks.
+
+Chunks travel as they are stored. In a compressed store they stay compressed; in an encrypted store the wire carries ciphertext, and the receiver decodes and re-hashes every chunk before keeping it, so a lying peer cannot plant data under the wrong id. This also means two encrypted stores can only exchange chunks if they share a master key (copy the store, then `passwd` one of them).
+
+Access is a shared secret: `--token-file` on both ends (first line of the file). The handshake is mutual, each side proves it knows the token by keying BLAKE3 over a server nonce, so a client does not hand data to an impostor either. Without a token the server lets anyone who can connect in. `--read-only` refuses every write, and `--max-conns` caps connections. A snapshot that exists on both sides under the same name with different contents is reported as a conflict and left alone; `push` and `pull` then exit with 1.
+
+**There is no TLS.** On an untrusted network put it behind an SSH tunnel or a VPN. The token is not sent in the clear, but the data is (ciphertext, if the store is encrypted).
+
+`--metrics-listen ADDR` adds a plain HTTP `/metrics` page for Prometheus. Ctrl-C stops the listeners and lets running requests finish.
+
+## WebDAV
+
+`--dav-listen ADDR` serves the snapshots as a read-only WebDAV share: the root lists snapshots, each snapshot is its directory tree. Class 1 only (OPTIONS, PROPFIND, GET, HEAD); every write method gets 405. GET supports `Range`, `ETag` (the object id) and `If-None-Match`; a directory opened in a browser shows a plain index. Windows can map it as a drive, `davfs2` mounts it on Linux, Finder on macOS.
+
+With `--token-file` the share asks for HTTP Basic auth and takes the token as the password (any user name). Basic auth is cleartext, so keep it on loopback or behind a tunnel. While a file is being sent the store is read-locked, which makes a slow client delay a concurrent `push`.
+
+## Tar
+
+`cas export NAME` writes a snapshot as a tar stream: ustar headers, GNU long-name records for paths that do not fit, base-256 sizes past 8 GiB. `cas import` reads ustar, GNU and pax archives (what GNU tar and bsdtar write) into a new snapshot. Paths with `..`, backslashes, or non-UTF-8 bytes, hard links and device nodes are skipped and listed; a malformed or truncated archive is an error and leaves no snapshot behind (chunks already written are unreferenced and `gc` removes them). Owners and extended attributes are dropped, and sub-second mtimes are not kept, so a round trip keeps file ids but not always the root tree id.
+
 ## Reading
 
 `open_reader` gives a `Read + Seek` view that decodes one chunk at a time, and `read_range` is built on it. Reads take `&self` and the store is `Sync`, so any number of threads can read the same store; writes and `gc` need `&mut self`, which means a caller who wants both wraps the store in an `RwLock` and `gc` blocks readers while it runs.
@@ -219,7 +252,8 @@ Not covered: hard links are stored as separate files, owners and extended attrib
 | `tests/props.rs` (proptest) | random put/remove/gc/reopen sequences against a model; chunker reassembly and read-size independence; manifest and segment parsers on arbitrary bytes; truncated segment is always a clean prefix; tampered Merkle proofs |
 | `tests/crash_failpoints.rs` | the binary exits at named points inside put/rm/gc (`cargo test --features failpoints`), then the store must reopen, verify, keep committed data, and gc cleanly |
 | `tests/crash_kill.rs` | the binary is killed at arbitrary times during put and gc |
-| `fuzz/` | libFuzzer targets for `Manifest::decode`, `segment::scan` and both chunkers (`cargo +nightly fuzz run manifest_decode`); CI runs 60 s per target on every push; a separate `fuzz` workflow runs 30 min per target every Sunday (and on demand) and uploads the crashing input if it finds one |
+| `tests/net.rs`, `tests/dav.rs`, `tests/tar.rs`, `tests/cli_net.rs` | sync between stores and over loopback sockets (auth, read-only, hostile frames, idle drop), WebDAV requests and ranges, tar round trips against the system `tar`, malformed archives, the `serve` / `push` / `pull` commands |
+| `fuzz/` | libFuzzer targets for `Manifest::decode`, `segment::scan`, both chunkers, tree and format decoding, wire frames, the HTTP request parser and the tar importer (`cargo +nightly fuzz run manifest_decode`); CI runs 60 s per target on every push; a separate `fuzz` workflow runs 30 min per target every Sunday (and on demand) and uploads the crashing input if it finds one |
 
 One failpoint test exists because of a real hazard: a put whose chunks are all already stored changes no index slot until refcounts are bumped, so the dirty flag has to be set before the manifest becomes visible. Removing that line makes `crash_on_dedup_only_put_does_not_lose_data` fail.
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `cas serve`, `push`, `pull`: framed TCP protocol with a mutual token handshake, read-only mode, only missing chunks are sent; chunks cross the wire as stored (compressed or encrypted)
+- Read-only WebDAV share of the snapshots (`serve --dav-listen`) with Range, ETag and optional Basic auth, and an HTTP `/metrics` listener
+- `cas export` / `cas import`: snapshots as tar (ustar, GNU long names, pax on read)
 - `cas check` and `cas repair --from`, `--max-size` quota, `cas metrics` (Prometheus), `--json` on every command, `cas bench`
 - Per-chunk lz4 compression (`--compress lz4`) and encryption (XChaCha20-Poly1305, Argon2id, keyed chunk ids; `--password-file`, `cas passwd`); new v2 record layout with a FORMAT file, stores written before it keep working
 - Directory snapshots: `cas snapshot create/ls/show/restore/diff/verify/forget/prune`, tree objects, retention rules (keep-last/daily/weekly/monthly)
