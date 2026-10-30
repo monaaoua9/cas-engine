@@ -317,6 +317,8 @@ impl Store {
         let mut long_link: Option<String> = None;
         let mut pax = Pax::default();
         let mut skipped: Vec<std::path::PathBuf> = Vec::new();
+        // regular files seen so far, so a hard link can point at one
+        let mut seen: std::collections::HashMap<String, (crate::hash::Hash, u64)> = std::collections::HashMap::new();
 
         while let Some(h) = read_block(&mut input)? {
             if h.iter().all(|&b| b == 0) {
@@ -428,7 +430,22 @@ impl Store {
                     acc.files += 1;
                     acc.bytes += r.size;
                     acc.new_bytes += r.new_bytes;
+                    seen.insert(comps.join("/"), (r.id, r.size));
                     place(&mut root, &comps, Node::File(entry(Kind::File, r.size, r.id, String::new())))?;
+                }
+                b'1' => {
+                    skip(&mut input, size + padding(size))?;
+                    // the link target is a path from the archive root, same cleanup as entry names
+                    let target = components(link.trim_start_matches("./")).map(|c| c.join("/"));
+                    let Some(&(id, fsize)) = target.as_ref().and_then(|t| seen.get(t)) else {
+                        skipped.push(path.into());
+                        continue;
+                    };
+                    // a link to something we already stored costs nothing; it becomes a second entry
+                    acc.files += 1;
+                    acc.bytes += fsize;
+                    seen.insert(comps.join("/"), (id, fsize));
+                    place(&mut root, &comps, Node::File(entry(Kind::File, fsize, id, String::new())))?;
                 }
                 b'2' => {
                     skip(&mut input, size + padding(size))?;
@@ -440,7 +457,7 @@ impl Store {
                     acc.links += 1;
                 }
                 _ => {
-                    // hard links, devices, fifos
+                    // devices, fifos, links to things we did not keep
                     skip(&mut input, size + padding(size))?;
                     skipped.push(path.into());
                 }

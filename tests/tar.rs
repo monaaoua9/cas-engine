@@ -283,3 +283,23 @@ fn system_tar_reads_our_archives_and_we_read_theirs() {
     b.import_tar(fs::File::open(&theirs).unwrap(), Some("t")).unwrap();
     assert_eq!(paths(&a, "one"), paths(&b, "t"));
 }
+
+#[test]
+fn hard_links_become_second_entries_with_the_same_object() {
+    let mut tar = Vec::new();
+    push_file(&mut tar, "dir/orig", &noise(20_000, 8));
+    tar.extend(raw("copy", b'1', &octal(0), "dir/orig"));
+    // dangling link: nothing to point at
+    tar.extend(raw("dangling", b'1', &octal(0), "nope"));
+
+    let (_d, mut st) = store();
+    let r = st.import_tar(&finish(tar)[..], Some("s")).unwrap();
+    assert_eq!(r.files, 2);
+    assert_eq!(r.skipped.len(), 1);
+
+    let s = st.snapshot_get("s").unwrap();
+    let flat = st.flatten(&s.root).unwrap();
+    let id = |p: &str| flat.iter().find(|(n, _)| n == p).map(|(_, e)| e.id).unwrap();
+    assert_eq!(id("dir/orig"), id("copy"));
+    st.snapshot_verify("s").unwrap();
+}

@@ -239,7 +239,7 @@ With `--token-file` the share asks for HTTP Basic auth and takes the token as th
 
 ## Tar
 
-`cas export NAME` writes a snapshot as a tar stream: ustar headers, GNU long-name records for paths that do not fit, base-256 sizes past 8 GiB. `cas import` reads ustar, GNU and pax archives (what GNU tar and bsdtar write) into a new snapshot. Paths with `..`, backslashes, or non-UTF-8 bytes, hard links and device nodes are skipped and listed; a malformed or truncated archive is an error and leaves no snapshot behind (chunks already written are unreferenced and `gc` removes them). Owners and extended attributes are dropped, and sub-second mtimes are not kept, so a round trip keeps file ids but not always the root tree id.
+`cas export NAME` writes a snapshot as a tar stream: ustar headers, GNU long-name records for paths that do not fit, base-256 sizes past 8 GiB. `cas import` reads ustar, GNU and pax archives (what GNU tar and bsdtar write) into a new snapshot. Hard links to a file earlier in the archive become a second entry for the same object (no extra data stored). Paths with `..`, backslashes, or non-UTF-8 bytes, links to something not in the archive, and device nodes are skipped and listed; a malformed or truncated archive is an error and leaves no snapshot behind (chunks already written are unreferenced and `gc` removes them). Owners and extended attributes are dropped, and sub-second mtimes are not kept, so a round trip keeps file ids but not always the root tree id.
 
 ## Reading
 
