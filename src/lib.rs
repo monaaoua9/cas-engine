@@ -11,6 +11,7 @@ pub mod index;
 pub mod manifest;
 pub mod merkle;
 pub mod segment;
+pub mod snapshot;
 pub mod store;
 mod
 cursor;
@@ -23,5 +24,6 @@ pub use error::{Error, Result};
 pub use hash::Hash;
 pub use manifest::{ChunkRef, Manifest};
 pub use merkle::{MerkleTree, Proof};
+pub use snapshot::{Retention, Snapshot};
 pub use store::{ObjectReader, Store, StoreConfig};
 pub use tree::{Entry, Kind, Tree};
