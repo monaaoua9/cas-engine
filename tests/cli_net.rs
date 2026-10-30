@@ -179,3 +179,32 @@ fn export_and_import_round_trip_through_files_and_pipes() {
     assert_eq!(cas(&b, &["import", junk.to_str().unwrap(), "-n", "bad"]).status.code(), Some(2));
     assert!(!text(&cas(&b, &["snapshot", "ls"]).stdout).contains("bad"));
 }
+
+// SIGINT can't be sent to a child portably, so this only runs where `kill` exists
+#[cfg(unix)]
+#[test]
+fn ctrl_c_stops_serve_cleanly_and_the_store_reopens() {
+    let d = tempfile::tempdir().unwrap();
+    let (a, b) = (d.path().join("a"), d.path().join("b"));
+    let src = tree();
+    assert!(cas(&a, &["snapshot", "create", src.path().to_str().unwrap(), "-n", "one"]).status.success());
+
+    let mut srv = serve(&b, &[]);
+    assert!(cas(&a, &["push", &srv.cas]).status.success());
+
+    let pid = srv.child.id().to_string();
+    assert!(Command::new("kill").args(["-INT", &pid]).status().unwrap().success());
+
+    let t = std::time::Instant::now();
+    let status = loop {
+        if let Some(s) = srv.child.try_wait().unwrap() {
+            break s;
+        }
+        assert!(t.elapsed().as_secs() < 10, "serve ignored SIGINT");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert!(status.success(), "{status:?}");
+
+    // lock released, data intact
+    assert!(cas(&b, &["snapshot", "verify", "one"]).status.success());
+}
